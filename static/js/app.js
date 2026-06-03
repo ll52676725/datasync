@@ -4,6 +4,18 @@ let progressPollingInterval = null;
 let configNameForEdit = null;
 let selectedTables = [];
 
+/** 数据库类型对应的默认端口 */
+const DB_DEFAULT_PORTS = {
+    mysql: 3306,
+    db2: 50000
+};
+
+/** 数据库类型对应的标签 */
+const DB_TYPE_LABELS = {
+    mysql: 'MySQL',
+    db2: 'DB2'
+};
+
 const pageTitles = {
     dashboard: { title: '仪表盘', subtitle: '查看同步系统概览' },
     configs: { title: '配置管理', subtitle: '管理数据库同步配置' },
@@ -64,6 +76,26 @@ function initConfigTabs() {
             document.getElementById(`section-${section}`).classList.add('active');
         });
     });
+}
+
+/**
+ * 数据库类型切换处理。
+ * 当用户在源/目标数据库选择不同的类型时，自动更新默认端口。
+ * @param {string} section - "source" 或 "target"
+ */
+function onDbTypeChange(section) {
+    const typeSelect = document.getElementById(`${section}Type`);
+    const portInput = document.getElementById(`${section}Port`);
+    const selectedType = typeSelect.value;
+
+    // 仅当端口是当前类型的默认值时，才自动切换端口
+    const currentPort = parseInt(portInput.value);
+    const isDefaultPort = Object.values(DB_DEFAULT_PORTS).includes(currentPort);
+    if (isDefaultPort) {
+        portInput.value = DB_DEFAULT_PORTS[selectedType] || 3306;
+    }
+
+    console.log(`${section} 数据库类型切换为: ${selectedType}, 端口: ${portInput.value}`);
 }
 
 function showToast(message, type = 'info') {
@@ -261,11 +293,15 @@ async function loadConfigs() {
             <div class="config-details">
                 <div class="detail-item">
                     <span class="label">源数据库</span>
-                    <span class="value">${config.config.source.host}:${config.config.source.port}/${config.config.source.database}</span>
+                    <span class="value">${DB_TYPE_LABELS[config.config.source.type] || 'MySQL'}: ${config.config.source.host}:${config.config.source.port}/${config.config.source.database}</span>
                 </div>
                 <div class="detail-item">
                     <span class="label">目标数据库</span>
-                    <span class="value">${config.config.target.host}:${config.config.target.port}/${config.config.target.database}</span>
+                    <span class="value">${DB_TYPE_LABELS[config.config.target.type] || 'MySQL'}: ${config.config.target.host}:${config.config.target.port}/${config.config.target.database}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">同步方向</span>
+                    <span class="value">${DB_TYPE_LABELS[config.config.source.type] || 'MySQL'} → ${DB_TYPE_LABELS[config.config.target.type] || 'MySQL'}</span>
                 </div>
                 <div class="detail-item">
                     <span class="label">并行表数</span>
@@ -297,6 +333,8 @@ function showConfigModal(configName = null) {
     } else {
         title.textContent = '新建配置';
         document.getElementById('configName').value = '';
+        document.getElementById('sourceType').value = 'mysql';
+        document.getElementById('targetType').value = 'mysql';
         document.getElementById('sourcePort').value = 3306;
         document.getElementById('targetPort').value = 3306;
         document.getElementById('syncParallel').value = 4;
@@ -319,12 +357,14 @@ async function loadConfigForEdit(name) {
     const config = data.config;
     document.getElementById('configName').value = name;
     
+    document.getElementById('sourceType').value = config.source.type || 'mysql';
     document.getElementById('sourceHost').value = config.source.host;
     document.getElementById('sourcePort').value = config.source.port;
     document.getElementById('sourceUser').value = config.source.user;
     document.getElementById('sourcePassword').value = config.source.password;
     document.getElementById('sourceDatabase').value = config.source.database;
     
+    document.getElementById('targetType').value = config.target.type || 'mysql';
     document.getElementById('targetHost').value = config.target.host;
     document.getElementById('targetPort').value = config.target.port;
     document.getElementById('targetUser').value = config.target.user;
@@ -338,119 +378,154 @@ async function loadConfigForEdit(name) {
 }
 
 async function saveConfig() {
-    const name = document.getElementById('configName').value.trim();
-    
-    if (!name) {
-        showToast('请输入配置名称', 'error');
-        return;
-    }
-
-    const config = {
-        source: {
-            host: document.getElementById('sourceHost').value.trim(),
-            port: parseInt(document.getElementById('sourcePort').value),
-            user: document.getElementById('sourceUser').value.trim(),
-            password: document.getElementById('sourcePassword').value,
-            database: document.getElementById('sourceDatabase').value.trim(),
-            charset: 'utf8mb4'
-        },
-        target: {
-            host: document.getElementById('targetHost').value.trim(),
-            port: parseInt(document.getElementById('targetPort').value),
-            user: document.getElementById('targetUser').value.trim(),
-            password: document.getElementById('targetPassword').value,
-            database: document.getElementById('targetDatabase').value.trim(),
-            charset: 'utf8mb4'
-        },
-        sync: {
-            parallel_tables: parseInt(document.getElementById('syncParallel').value),
-            chunk_size: parseInt(document.getElementById('syncChunkSize').value),
-            batch_insert_size: parseInt(document.getElementById('syncBatchSize').value),
-            tables: selectedTables.length > 0 ? selectedTables : 
-                document.getElementById('syncTables').value.split(',').map(s => s.trim()).filter(s => s)
-        }
-    };
-
-    const requiredFields = [
-        ['source.host', '源数据库主机'],
-        ['source.user', '源数据库用户名'],
-        ['source.database', '源数据库名'],
-        ['target.host', '目标数据库主机'],
-        ['target.user', '目标数据库用户名'],
-        ['target.database', '目标数据库名']
-    ];
-
-    for (const [field, label] of requiredFields) {
-        const parts = field.split('.');
-        if (!config[parts[0]][parts[1]]) {
-            showToast(`请填写${label}`, 'error');
+    try {
+        const name = document.getElementById('configName').value.trim();
+        
+        if (!name) {
+            showToast('请输入配置名称', 'error');
             return;
         }
-    }
 
-    const data = await apiRequest('/api/configs', 'POST', { name, config });
-    if (data && data.success) {
-        showToast('配置保存成功', 'success');
-        closeConfigModal();
-        loadConfigs();
-    } else if (data) {
-        showToast(data.message || '保存失败', 'error');
+        const sourceType = document.getElementById('sourceType').value;
+        const targetType = document.getElementById('targetType').value;
+
+        const config = {
+            source: {
+                type: sourceType,
+                host: document.getElementById('sourceHost').value.trim(),
+                port: parseInt(document.getElementById('sourcePort').value),
+                user: document.getElementById('sourceUser').value.trim(),
+                password: document.getElementById('sourcePassword').value,
+                database: document.getElementById('sourceDatabase').value.trim(),
+                charset: 'utf8mb4'
+            },
+            target: {
+                type: targetType,
+                host: document.getElementById('targetHost').value.trim(),
+                port: parseInt(document.getElementById('targetPort').value),
+                user: document.getElementById('targetUser').value.trim(),
+                password: document.getElementById('targetPassword').value,
+                database: document.getElementById('targetDatabase').value.trim(),
+                charset: 'utf8mb4'
+            },
+            sync: {
+                parallel_tables: parseInt(document.getElementById('syncParallel').value),
+                chunk_size: parseInt(document.getElementById('syncChunkSize').value),
+                batch_insert_size: parseInt(document.getElementById('syncBatchSize').value),
+                tables: selectedTables.length > 0 ? selectedTables : 
+                    document.getElementById('syncTables').value.split(',').map(s => s.trim()).filter(s => s)
+            }
+        };
+
+        const requiredFields = [
+            ['source.host', '源数据库主机'],
+            ['source.user', '源数据库用户名'],
+            ['source.database', '源数据库名'],
+            ['target.host', '目标数据库主机'],
+            ['target.user', '目标数据库用户名'],
+            ['target.database', '目标数据库名']
+        ];
+
+        for (const [field, label] of requiredFields) {
+            const parts = field.split('.');
+            if (!config[parts[0]][parts[1]]) {
+                showToast(`请填写${label}`, 'error');
+                return;
+            }
+        }
+
+        console.log('保存配置:', name, '源:', sourceType, '目标:', targetType);
+        const data = await apiRequest('/api/configs', 'POST', { name, config });
+        if (data && data.success) {
+            showToast('配置保存成功', 'success');
+            closeConfigModal();
+            loadConfigs();
+        } else if (data) {
+            showToast(data.message || '保存失败', 'error');
+        } else {
+            showToast('保存失败，请检查网络连接', 'error');
+        }
+    } catch (error) {
+        console.error('saveConfig 错误:', error);
+        showToast('保存配置时出错: ' + error.message, 'error');
     }
 }
 
 async function testConnection() {
     const name = document.getElementById('configName').value.trim();
     if (!name) {
-        showToast('请先保存配置再测试连接', 'error');
+        showToast('请先输入配置名称', 'error');
         return;
     }
 
-    const tempConfig = {
-        source: {
-            host: document.getElementById('sourceHost').value.trim(),
-            port: parseInt(document.getElementById('sourcePort').value),
-            user: document.getElementById('sourceUser').value.trim(),
-            password: document.getElementById('sourcePassword').value,
-            database: document.getElementById('sourceDatabase').value.trim()
-        },
-        target: {
-            host: document.getElementById('targetHost').value.trim(),
-            port: parseInt(document.getElementById('targetPort').value),
-            user: document.getElementById('targetUser').value.trim(),
-            password: document.getElementById('targetPassword').value,
-            database: document.getElementById('targetDatabase').value.trim()
-        }
-    };
+    const sourceType = document.getElementById('sourceType').value;
+    const targetType = document.getElementById('targetType').value;
+    const sourceHost = document.getElementById('sourceHost').value.trim();
+    const sourceUser = document.getElementById('sourceUser').value.trim();
+    const sourceDatabase = document.getElementById('sourceDatabase').value.trim();
+    const targetHost = document.getElementById('targetHost').value.trim();
+    const targetUser = document.getElementById('targetUser').value.trim();
+    const targetDatabase = document.getElementById('targetDatabase').value.trim();
+
+    if (!sourceHost || !sourceUser || !sourceDatabase) {
+        showToast('请先填写源数据库连接信息', 'error');
+        return;
+    }
+    if (!targetHost || !targetUser || !targetDatabase) {
+        showToast('请先填写目标数据库连接信息', 'error');
+        return;
+    }
 
     showToast('正在测试连接...', 'info');
 
-    try {
-        let allSuccess = true;
-        const results = {};
+    const tempConfig = {
+        source: {
+            type: sourceType,
+            host: sourceHost,
+            port: parseInt(document.getElementById('sourcePort').value),
+            user: sourceUser,
+            password: document.getElementById('sourcePassword').value,
+            database: sourceDatabase,
+            charset: 'utf8mb4'
+        },
+        target: {
+            type: targetType,
+            host: targetHost,
+            port: parseInt(document.getElementById('targetPort').value),
+            user: targetUser,
+            password: document.getElementById('targetPassword').value,
+            database: targetDatabase,
+            charset: 'utf8mb4'
+        },
+        sync: { parallel_tables: 1, chunk_size: 1000, batch_insert_size: 100, tables: [] }
+    };
 
-        for (const section of ['source', 'target']) {
-            try {
-                const { createConnection } = await import('/static/js/db-test.js');
-                const result = await createConnection(tempConfig[section]);
-                results[section] = { success: result.success, message: result.message };
-                if (!result.success) allSuccess = false;
-            } catch (e) {
-                results[section] = { success: false, message: '测试失败' };
-                allSuccess = false;
-            }
+    const tempConfigName = '_temp_test_' + Date.now();
+
+    try {
+        const saveResult = await apiRequest('/api/configs', 'POST', { name: tempConfigName, config: tempConfig });
+        if (!saveResult || !saveResult.success) {
+            showToast('请先填写完整的数据库连接信息', 'error');
+            return;
         }
 
-        if (allSuccess) {
+        const testResult = await apiRequest(`/api/configs/${tempConfigName}/test`, 'POST');
+        await apiRequest(`/api/configs/${tempConfigName}`, 'DELETE');
+
+        if (testResult && testResult.success) {
             showToast('所有连接测试通过', 'success');
-        } else {
-            const errors = Object.entries(results)
+        } else if (testResult) {
+            const errors = Object.entries(testResult.results || {})
                 .filter(([_, r]) => !r.success)
                 .map(([k, r]) => `${k === 'source' ? '源' : '目标'}: ${r.message}`)
                 .join('; ');
-            showToast(errors, 'error');
+            showToast(errors || '连接测试失败', 'error');
+        } else {
+            showToast('连接测试请求失败', 'error');
         }
     } catch (error) {
-        showToast('请先保存配置，然后使用配置列表中的测试按钮', 'info');
+        console.error('testConnection 错误:', error);
+        showToast('测试连接时出错: ' + error.message, 'error');
     }
 }
 
@@ -473,6 +548,7 @@ async function loadSourceTables() {
     const user = document.getElementById('sourceUser').value.trim();
     const password = document.getElementById('sourcePassword').value;
     const database = document.getElementById('sourceDatabase').value.trim();
+    const sourceType = document.getElementById('sourceType').value;
 
     if (!host || !user || !database) {
         showToast('请先填写源数据库连接信息', 'error');
@@ -485,8 +561,8 @@ async function loadSourceTables() {
 
     const tempConfigName = '_temp_test_config_' + Date.now();
     const config = {
-        source: { host, port, user, password, database, charset: 'utf8mb4' },
-        target: { host: '', port: 3306, user: '', password: '', database: '', charset: 'utf8mb4' },
+        source: { type: sourceType, host, port, user, password, database, charset: 'utf8mb4' },
+        target: { type: 'mysql', host: '', port: 3306, user: '', password: '', database: '', charset: 'utf8mb4' },
         sync: { parallel_tables: 1, chunk_size: 1000, batch_insert_size: 100, tables: [] }
     };
 
@@ -682,19 +758,31 @@ async function createTask() {
 
     const mode = document.querySelector('input[name="syncMode"]:checked').value;
 
-    const data = await apiRequest('/api/tasks', 'POST', { config_name: configName, mode });
-    if (data && data.success) {
-        showToast('任务创建成功，正在启动...', 'success');
-        closeTaskModal();
-        
-        const taskId = data.task.task_id;
-        const startData = await apiRequest(`/api/tasks/${taskId}/start`, 'POST');
-        
-        if (startData && startData.success) {
-            showToast('任务已启动', 'success');
-            loadTasks();
-            viewTaskDetail(taskId);
+    try {
+        const data = await apiRequest('/api/tasks', 'POST', { config_name: configName, mode });
+        if (data && data.success) {
+            showToast('任务创建成功，正在启动...', 'success');
+            closeTaskModal();
+            
+            const taskId = data.task.task_id;
+            const startData = await apiRequest(`/api/tasks/${taskId}/start`, 'POST');
+            
+            if (startData && startData.success) {
+                showToast('任务已启动', 'success');
+                switchTab('tasks');
+                loadTasks();
+                setTimeout(() => viewTaskDetail(taskId), 500);
+            } else {
+                showToast(startData?.message || '任务启动失败', 'error');
+                switchTab('tasks');
+                loadTasks();
+            }
+        } else {
+            showToast(data?.message || '创建任务失败', 'error');
         }
+    } catch (error) {
+        console.error('createTask 错误:', error);
+        showToast('创建任务时出错: ' + error.message, 'error');
     }
 }
 

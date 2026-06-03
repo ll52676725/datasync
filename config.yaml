@@ -1,4 +1,9 @@
+# 同步配置文件
+# 支持 mysql 和 db2 两种数据库类型
+# type 字段取值: mysql | db2（不填默认 mysql，兼容旧配置）
+
 source:
+  type: "mysql"                    # 源数据库类型: mysql 或 db2
   host: "your-cloud-mysql-host.rds.amazonaws.com"
   port: 3306
   user: "reader"
@@ -7,6 +12,7 @@ source:
   charset: "utf8mb4"
 
 target:
+  type: "mysql"                    # 目标数据库类型: mysql 或 db2
   host: "127.0.0.1"
   port: 3306
   user: "root"
@@ -15,10 +21,45 @@ target:
   charset: "utf8mb4"
 
 sync:
-  parallel_tables: 4
-  chunk_size: 50000
-  batch_insert_size: 5000
-  tables:
+  parallel_tables: 4              # 并行同步的表数量
+  chunk_size: 50000                # 按主键分块的大小
+  batch_insert_size: 5000          # 批量插入的行数
+  tables:                          # 要同步的表列表（留空则同步所有表）
     - "table_a"
     - "table_b"
     - "table_c"
+
+# ---- DB2 示例配置 ----
+# source:
+#   type: "db2"
+#   host: "db2-server.example.com"
+#   port: 50000
+#   user: "db2inst1"
+#   password: "your_password"
+#   database: "SAMPLE"
+#
+# target:
+#   type: "db2"
+#   host: "db2-target.example.com"
+#   port: 50000
+#   user: "db2inst1"
+#   password: "your_password"
+#   database: "TARGET_DB"
+
+# ---- MySQL→DB2 示例配置 ----
+# source:
+#   type: "mysql"
+#   host: "mysql-server.example.com"
+#   port: 3306
+#   user: "reader"
+#   password: "your_password"
+#   database: "source_db"
+#   charset: "utf8mb4"
+#
+# target:
+#   type: "db2"
+#   host: "db2-server.example.com"
+#   port: 50000
+#   user: "db2inst1"
+#   password: "your_password"
+#   database: "TARGET_DB"

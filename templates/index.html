@@ -3,8 +3,8 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>MySQL数据同步系统 - 控制台</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <title>数据同步系统 - 控制台</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2">
 </head>
 <body>
     <div class="app-container">
@@ -246,7 +246,7 @@
                 <button class="modal-close" onclick="closeConfigModal()">&times;</button>
             </div>
             <div class="modal-body">
-                <form id="configForm">
+                <form id="configForm" onsubmit="return false">
                     <div class="form-group">
                         <label>配置名称</label>
                         <input type="text" id="configName" required placeholder="例如：生产环境同步">
@@ -260,6 +260,13 @@
                     
                     <div class="config-section active" id="section-source">
                         <div class="form-grid">
+                            <div class="form-group">
+                                <label>数据库类型</label>
+                                <select id="sourceType" onchange="onDbTypeChange('source')">
+                                    <option value="mysql">MySQL</option>
+                                    <option value="db2">DB2</option>
+                                </select>
+                            </div>
                             <div class="form-group">
                                 <label>主机地址</label>
                                 <input type="text" id="sourceHost" placeholder="192.168.1.100">
@@ -285,6 +292,13 @@
                     
                     <div class="config-section" id="section-target">
                         <div class="form-grid">
+                            <div class="form-group">
+                                <label>数据库类型</label>
+                                <select id="targetType" onchange="onDbTypeChange('target')">
+                                    <option value="mysql">MySQL</option>
+                                    <option value="db2">DB2</option>
+                                </select>
+                            </div>
                             <div class="form-group">
                                 <label>主机地址</label>
                                 <input type="text" id="targetHost" placeholder="127.0.0.1">
@@ -333,9 +347,9 @@
                 </form>
             </div>
             <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeConfigModal()">取消</button>
-                <button class="btn-secondary" onclick="testConnection()">测试连接</button>
-                <button class="btn-primary" onclick="saveConfig()">保存配置</button>
+                <button type="button" class="btn-secondary" onclick="closeConfigModal()">取消</button>
+                <button type="button" class="btn-secondary" onclick="testConnection()">测试连接</button>
+                <button type="button" class="btn-primary" onclick="saveConfig()">保存配置</button>
             </div>
         </div>
     </div>
@@ -374,8 +388,8 @@
                 </div>
             </div>
             <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeTaskModal()">取消</button>
-                <button class="btn-primary" onclick="createTask()">创建并启动</button>
+                <button type="button" class="btn-secondary" onclick="closeTaskModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="createTask()">创建并启动</button>
             </div>
         </div>
     </div>
@@ -389,13 +403,13 @@
             <div class="modal-body" id="taskDetailContent">
             </div>
             <div class="modal-footer">
-                <button class="btn-secondary" onclick="closeTaskDetailModal()">关闭</button>
+                <button type="button" class="btn-secondary" onclick="closeTaskDetailModal()">关闭</button>
             </div>
         </div>
     </div>
     
     <div id="toast" class="toast"></div>
     
-    <script src="{{ url_for('static', filename='js/app.js') }}"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=2"></script>
 </body>
 </html>

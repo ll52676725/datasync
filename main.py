@@ -1,3 +1,25 @@
+"""
+main.py — 多数据库同步命令行工具
+
+基于适配器模式，支持 mysql→mysql, db2→db2, mysql→db2, db2→mysql 等组合。
+
+用法示例：
+  # MySQL→MySQL 同步（默认）
+  python main.py -c config.yaml
+
+  # DB2→DB2 同步
+  python main.py -c config_db2.yaml --resume
+
+  # MySQL→DB2 同步
+  python main.py -c config_mysql_to_db2.yaml
+
+  # 重置进度
+  python main.py --reset-all
+
+  # 详细日志
+  python main.py -v --log-file sync.log
+"""
+
 import argparse
 import yaml
 import logging
@@ -6,33 +28,53 @@ from sync_engine import run_sync, reset_progress
 
 
 def load_config(path):
+    """
+    加载 YAML 配置文件。
+
+    如果 source/target 节没有 type 字段，默认为 "mysql"（兼容旧配置）。
+
+    Args:
+        path: 配置文件路径
+
+    Returns:
+        配置字典
+    """
     with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        config = yaml.safe_load(f)
+
+    # 兼容旧配置：如果缺少 type 字段，默认为 mysql
+    for section in ["source", "target"]:
+        if section in config and "type" not in config[section]:
+            config[section]["type"] = "mysql"
+
+    return config
 
 
 def main():
-    parser = argparse.ArgumentParser(description="MySQL Cloud-to-Local Full Sync Tool")
-    parser.add_argument("-c", "--config", default="config.yaml", help="Path to config YAML file")
-    parser.add_argument("-v", "--verbose", action="store_true", help="Enable DEBUG logging")
-    parser.add_argument("--log-file", default=None, help="Write logs to file")
+    parser = argparse.ArgumentParser(
+        description="多数据库同步工具 (支持 MySQL/DB2)"
+    )
+    parser.add_argument("-c", "--config", default="config.yaml", help="配置文件路径 (默认: config.yaml)")
+    parser.add_argument("-v", "--verbose", action="store_true", help="启用 DEBUG 级别日志")
+    parser.add_argument("--log-file", default=None, help="日志输出到文件")
 
     mode_group = parser.add_mutually_exclusive_group()
     mode_group.add_argument(
         "--resume", action="store_true",
-        help="Resume from previous progress (keep existing data, skip completed tables)",
+        help="断点续传模式（保留已有数据，跳过已完成的表）",
     )
     mode_group.add_argument(
         "--restart", action="store_true",
-        help="Restart from scratch (truncate target tables, reset all progress)",
+        help="重新开始模式（清空目标表，重置所有进度）",
     )
 
     parser.add_argument(
         "--reset-table", default=None,
-        help="Reset progress for a specific table only (then exit, no sync)",
+        help="重置指定表的进度（然后退出，不执行同步）",
     )
     parser.add_argument(
         "--reset-all", action="store_true",
-        help="Reset all progress (then exit, no sync)",
+        help="重置所有进度（然后退出，不执行同步）",
     )
 
     args = parser.parse_args()
@@ -41,6 +83,11 @@ def main():
     setup_logger(level=level, log_file=args.log_file)
 
     config = load_config(args.config)
+
+    # 打印同步方向信息
+    src_type = config.get("source", {}).get("type", "mysql")
+    tgt_type = config.get("target", {}).get("type", "mysql")
+    logging.getLogger(__name__).info("同步方向: %s → %s", src_type, tgt_type)
 
     if args.reset_all:
         reset_progress(config["target"])

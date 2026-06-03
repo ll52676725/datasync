@@ -78,10 +78,7 @@ class DB2MemoryStore:
         return cfg["config"] if cfg else None
 
     def list_configs(self) -> List[Dict]:
-        return [
-            {k: v for k, v in cfg.items() if k != "config"}
-            for cfg in self._configs.values()
-        ]
+        return list(self._configs.values())
 
     def delete_config(self, config_name: str) -> bool:
         if config_name in self._configs:
