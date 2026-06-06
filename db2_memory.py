@@ -1,10 +1,14 @@
 import threading
 import time
 import logging
+import json
+import os
 from datetime import datetime
 from typing import Optional, Dict, List, Any
 
 logger = logging.getLogger(__name__)
+
+PERSISTENCE_FILE = os.path.join(os.path.dirname(__file__), "sync_state.json")
 
 
 class DB2MemoryStore:
@@ -26,17 +30,72 @@ class DB2MemoryStore:
         self._sync_tasks: Dict[str, Dict] = {}
         self._sessions: Dict[str, Dict] = {}
         self._realtime_tasks: Dict[str, Dict] = {}
+        self._persistence_lock = threading.Lock()
+        self._last_persist_time = 0
+        self._persist_interval = 1.0
+        self._load_from_persistence()
         self._init_default_data()
 
     def _init_default_data(self):
-        self._users = {
-            "admin": {
-                "username": "admin",
-                "password": "admin123",
-                "created_at": datetime.now().isoformat(),
-                "role": "admin"
+        if not self._users:
+            self._users = {
+                "admin": {
+                    "username": "admin",
+                    "password": "admin123",
+                    "created_at": datetime.now().isoformat(),
+                    "role": "admin"
+                }
             }
-        }
+
+    def _load_from_persistence(self):
+        """从磁盘 JSON 文件加载持久化状态。"""
+        try:
+            if os.path.exists(PERSISTENCE_FILE):
+                with open(PERSISTENCE_FILE, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                self._configs = data.get("configs", {})
+                self._sync_progress = data.get("sync_progress", {})
+                self._sync_tasks = data.get("sync_tasks", {})
+                self._realtime_tasks = data.get("realtime_tasks", {})
+                self._users = data.get("users", self._users)
+                logger.info("从持久化文件加载状态成功: %s", PERSISTENCE_FILE)
+                logger.info("  - 配置: %d 个", len(self._configs))
+                logger.info("  - 实时任务: %d 个", len(self._realtime_tasks))
+        except Exception as e:
+            logger.error("加载持久化状态失败: %s", e)
+
+    def _persist_to_disk(self):
+        """将状态持久化到磁盘 JSON 文件。"""
+        try:
+            data = {
+                "configs": self._configs,
+                "sync_progress": self._sync_progress,
+                "sync_tasks": self._sync_tasks,
+                "realtime_tasks": self._realtime_tasks,
+                "users": self._users,
+                "persisted_at": datetime.now().isoformat(),
+            }
+            tmp_file = PERSISTENCE_FILE + ".tmp"
+            with open(tmp_file, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp_file, PERSISTENCE_FILE)
+            logger.debug("状态持久化成功: %s", PERSISTENCE_FILE)
+        except Exception as e:
+            logger.error("持久化状态失败: %s", e)
+
+    def _mark_dirty(self, immediate: bool = False):
+        """标记状态已变更，触发异步持久化。
+
+        Args:
+            immediate: 是否立即持久化（用于关键状态更新，如断点位置）
+        """
+        now = time.time()
+        if immediate or (now - self._last_persist_time >= self._persist_interval):
+            with self._persistence_lock:
+                now = time.time()
+                if immediate or (now - self._last_persist_time >= self._persist_interval):
+                    self._persist_to_disk()
+                    self._last_persist_time = now
 
     def create_session(self, username: str) -> str:
         import uuid
@@ -75,6 +134,7 @@ class DB2MemoryStore:
             "created_at": datetime.now().isoformat(),
             "updated_at": datetime.now().isoformat()
         }
+        self._mark_dirty()
         return self._configs[config_name]
 
     def get_config(self, config_name: str) -> Optional[Dict]:
@@ -87,6 +147,7 @@ class DB2MemoryStore:
     def delete_config(self, config_name: str) -> bool:
         if config_name in self._configs:
             del self._configs[config_name]
+            self._mark_dirty()
             return True
         return False
 
@@ -167,6 +228,7 @@ class DB2MemoryStore:
         if task_id in self._sync_tasks:
             self._sync_tasks[task_id].update(kwargs)
             self._sync_tasks[task_id]["updated_at"] = datetime.now().isoformat()
+            self._mark_dirty()
 
     def get_task(self, task_id: str) -> Optional[Dict]:
         return self._sync_tasks.get(task_id)
@@ -250,6 +312,7 @@ class DB2MemoryStore:
             },
         }
         logger.info("创建实时任务: %s (配置: %s, 用户: %s)", task_id, config_name, username)
+        self._mark_dirty()
         return self._realtime_tasks[task_id]
 
     def get_realtime_task(self, task_id: str) -> Optional[Dict]:
@@ -269,9 +332,10 @@ class DB2MemoryStore:
             self._realtime_tasks[task_id].update(kwargs)
             self._realtime_tasks[task_id]["updated_at"] = datetime.now().isoformat()
             logger.debug("更新实时任务: %s, 字段: %s", task_id, list(kwargs.keys()))
+            self._mark_dirty(immediate=True)
 
     def update_realtime_task_stats(self, task_id: str, stats: Dict[str, Any]):
-        """更新实时任务统计信息。"""
+        """更新实时任务统计信息（包含断点位置，立即持久化）。"""
         if task_id in self._realtime_tasks:
             self._realtime_tasks[task_id]["stats"].update({
                 "total_events": stats.get("total_events", 0),
@@ -287,6 +351,7 @@ class DB2MemoryStore:
                 self._realtime_tasks[task_id]["binlog_pos"] = stats["current_binlog_pos"]
             if "current_scn" in stats and stats["current_scn"] is not None:
                 self._realtime_tasks[task_id]["current_scn"] = stats["current_scn"]
+            self._mark_dirty(immediate=True)
 
     def get_realtime_task_binlog_position(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取实时任务的断点位置（支持 MySQL binlog 和 Oracle SCN）。"""
@@ -311,6 +376,7 @@ class DB2MemoryStore:
         if task_id in self._realtime_tasks:
             del self._realtime_tasks[task_id]
             logger.info("删除实时任务: %s", task_id)
+            self._mark_dirty()
             return True
         return False
 
@@ -362,6 +428,7 @@ class DB2MemoryStore:
         }
         logger.info("创建智能同步任务: %s (配置: %s, 用户: %s, 快速同步天数: %d)",
                     task_id, config_name, username, quick_days)
+        self._mark_dirty()
         return self._realtime_tasks[task_id]
 
     def update_smart_sync_phase(self, task_id: str, phase: str, status: str,
@@ -390,6 +457,7 @@ class DB2MemoryStore:
                 task["status"] = "running"
             logger.debug("更新智能同步任务阶段: %s, 阶段=%s, 状态=%s, 进度=%.1f%%",
                          task_id, phase, status, progress)
+            self._mark_dirty()
 
     def get_smart_sync_task(self, task_id: str) -> Optional[Dict]:
         """获取智能同步任务（与实时任务共享存储）。"""

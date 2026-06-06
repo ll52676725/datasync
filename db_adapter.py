@@ -690,8 +690,12 @@ class MySQLAdapter(BaseDBAdapter):
             logger.error("获取 binlog 位置失败: %s", e)
             return None
 
-    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
-        """MySQL 插入或更新一行数据。"""
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str, auto_commit: bool = True):
+        """MySQL 插入或更新一行数据。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         columns = list(data.keys())
@@ -708,18 +712,24 @@ class MySQLAdapter(BaseDBAdapter):
 
         cur = conn.cursor()
         cur.execute(sql, values + values)
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
-    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
-        """MySQL 删除一行数据。"""
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
+        """MySQL 删除一行数据。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         sql = f"DELETE FROM {qt} WHERE {qpk} = %s"
 
         cur = conn.cursor()
         cur.execute(sql, (pk_value,))
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
     def check_cdc_environment(self, conn) -> Dict[str, Any]:
@@ -1116,8 +1126,12 @@ class DB2Adapter(BaseDBAdapter):
     def supports_cdc(self) -> bool:
         return False
 
-    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
-        """DB2 插入或更新一行数据（使用 MERGE 语句）。"""
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str, auto_commit: bool = True):
+        """DB2 插入或更新一行数据（使用 MERGE 语句）。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         columns = list(data.keys())
@@ -1141,18 +1155,24 @@ class DB2Adapter(BaseDBAdapter):
 
         cur = conn.cursor()
         cur.execute(sql, [pk_value] + update_values + values)
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
-    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
-        """DB2 删除一行数据。"""
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
+        """DB2 删除一行数据。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         sql = f"DELETE FROM {qt} WHERE {qpk} = ?"
 
         cur = conn.cursor()
         cur.execute(sql, (pk_value,))
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
 
@@ -1484,8 +1504,12 @@ class OracleAdapter(BaseDBAdapter):
     def supports_cdc(self) -> bool:
         return True
 
-    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
-        """Oracle 插入或更新一行数据（使用 MERGE 语句）。"""
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str, auto_commit: bool = True):
+        """Oracle 插入或更新一行数据（使用 MERGE 语句）。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         columns = list(data.keys())
@@ -1513,18 +1537,24 @@ class OracleAdapter(BaseDBAdapter):
 
         cur = conn.cursor()
         cur.execute(sql, [pk_value] + update_values + values)
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
-    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
-        """Oracle 删除一行数据。"""
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
+        """Oracle 删除一行数据。
+
+        Args:
+            auto_commit: 是否自动提交事务，False 时由调用方控制 commit
+        """
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         sql = f"DELETE FROM {qt} WHERE {qpk} = :1"
 
         cur = conn.cursor()
         cur.execute(sql, (pk_value,))
-        conn.commit()
+        if auto_commit:
+            conn.commit()
         cur.close()
 
     def get_current_scn(self, conn) -> Optional[int]:

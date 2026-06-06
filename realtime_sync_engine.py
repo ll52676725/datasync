@@ -216,12 +216,13 @@ class RealtimeSyncEngine:
 
     def _process_batch(self, events: List[CDCEvent]):
         """
-        批量处理 CDC 事件，同步到目标数据库。
+        批量处理 CDC 事件，同步到目标数据库（事务安全版）。
 
         核心改进：
-        1. 逐表处理，每表成功后立即更新位置
+        1. 逐表处理，每行成功后立即 commit 并更新位置（在 _sync_table_events 中处理）
         2. 逐行跟踪最后成功事件，异常时也保存位置
         3. 异常分支强制持久化最后成功位置，避免重复消费
+        4. finally 中回滚未提交的事务，避免残留
         """
         if not events:
             return
@@ -240,13 +241,9 @@ class RealtimeSyncEngine:
                 if table_last_success is not None:
                     last_successful_event = table_last_success
                     processed_count += len(table_events)
-                    self._update_position_from_event(last_successful_event)
 
             self.stats["synced_events"] += processed_count
             self.stats["last_sync_time"] = time.time()
-
-            if processed_count > 0 and last_successful_event is not None:
-                self._update_position_from_event(last_successful_event)
 
         except Exception as e:
             logger.error(
@@ -265,15 +262,20 @@ class RealtimeSyncEngine:
                 self._update_position_from_event(last_successful_event)
             raise
         finally:
+            try:
+                tgt_conn.rollback()
+            except Exception:
+                pass
             self.tgt_adapter.close_connection(tgt_conn)
 
     def _sync_table_events(self, conn, table_name: str, events: List[CDCEvent]) -> Optional[CDCEvent]:
         """
-        同步单张表的 CDC 事件。
+        同步单张表的 CDC 事件（事务安全版）。
 
         策略：
         - INSERT/UPDATE: 使用 upsert（幂等）
         - DELETE: 使用 delete
+        - 每行成功后立即 commit 并更新位置，确保崩溃后精确恢复
 
         Returns:
             最后一个成功处理的事件（用于位置更新），全部失败返回 None
@@ -287,12 +289,13 @@ class RealtimeSyncEngine:
         for event in events:
             try:
                 if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
-                    self.tgt_adapter.upsert_row(conn, table_name, event.data, pk_col)
+                    self.tgt_adapter.upsert_row(conn, table_name, event.data, pk_col, auto_commit=True)
                 elif event.event_type == CDCAction.DELETE:
                     pk_value = event.data.get(pk_col)
                     if pk_value is not None:
-                        self.tgt_adapter.delete_row(conn, table_name, pk_col, pk_value)
+                        self.tgt_adapter.delete_row(conn, table_name, pk_col, pk_value, auto_commit=True)
                 last_success = event
+                self._update_position_from_event(event)
             except Exception as e:
                 logger.error(
                     "同步事件失败: table=%s, type=%s, pk=%s, error=%s",
