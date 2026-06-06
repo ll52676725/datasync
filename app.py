@@ -33,6 +33,12 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from db_adapter import get_adapter, get_supported_types
 from db2_memory import db2_store
 from sync_engine_web import run_sync, reset_progress_db2
+from realtime_sync_engine import (
+    start_realtime_sync,
+    stop_realtime_sync,
+    get_realtime_stats,
+    list_running_realtime_tasks,
+)
 from logger_utils import setup_logger
 
 setup_logger(level=logging.INFO)
@@ -425,6 +431,188 @@ def get_dashboard():
         "stats": stats,
         "recent_tasks": recent_tasks,
         "active_progress": active_progress,
+    })
+
+
+# ====================================================================== #
+#                        实时同步 API
+# ====================================================================== #
+
+@app.route("/api/realtime/tasks", methods=["GET"])
+@login_required
+def list_realtime_tasks():
+    """列出当前用户的所有实时同步任务。"""
+    tasks = db2_store.list_realtime_tasks(request.username)
+    return jsonify({"success": True, "tasks": tasks})
+
+
+@app.route("/api/realtime/tasks", methods=["POST"])
+@login_required
+def create_realtime_task():
+    """
+    创建新的实时同步任务。
+
+    请求体:
+    {
+        "config_name": "配置名称",
+        "resume_from_binlog": true/false  # 是否从断点恢复
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "请求数据为空"}), 400
+
+    config_name = data.get("config_name", "").strip()
+    if not config_name:
+        return jsonify({"success": False, "message": "请选择配置"}), 400
+
+    config = db2_store.get_config(config_name)
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    src_type = config["source"].get("type", "mysql").lower()
+    src_adapter = get_adapter(config["source"])
+    if not src_adapter.supports_cdc():
+        return jsonify({
+            "success": False,
+            "message": f"源数据库类型 '{src_type}' 不支持实时同步（仅 MySQL 支持）",
+        }), 400
+
+    task_id = str(uuid.uuid4())
+    task = db2_store.create_realtime_task(task_id, config_name, request.username)
+    logger.info("实时任务已创建: %s (配置: %s, 用户: %s)", task_id, config_name, request.username)
+
+    return jsonify({"success": True, "message": "实时任务创建成功", "task": task})
+
+
+@app.route("/api/realtime/tasks/<task_id>/start", methods=["POST"])
+@login_required
+def start_realtime_task(task_id):
+    """启动实时同步任务。"""
+    task = db2_store.get_realtime_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    config = db2_store.get_config(task["config_name"])
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    data = request.get_json() or {}
+    resume_from_binlog = data.get("resume_from_binlog", False)
+
+    db2_store.update_realtime_task(task_id, status="starting", message="正在启动实时同步...")
+
+    success = start_realtime_sync(config, task_id, resume_from_binlog=resume_from_binlog)
+    if success:
+        db2_store.update_realtime_task(
+            task_id,
+            status="running",
+            started_at=datetime.now().isoformat(),
+            message="实时同步已启动",
+        )
+        logger.info("实时任务已启动: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "实时同步已启动"})
+    else:
+        db2_store.update_realtime_task(task_id, status="failed", message="启动失败")
+        return jsonify({"success": False, "message": "实时同步启动失败"}), 500
+
+
+@app.route("/api/realtime/tasks/<task_id>/stop", methods=["POST"])
+@login_required
+def stop_realtime_task(task_id):
+    """停止实时同步任务。"""
+    task = db2_store.get_realtime_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    success = stop_realtime_sync(task_id)
+    if success:
+        db2_store.update_realtime_task(
+            task_id,
+            status="stopped",
+            stopped_at=datetime.now().isoformat(),
+            message="实时同步已停止",
+        )
+        logger.info("实时任务已停止: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "实时同步已停止"})
+    else:
+        return jsonify({"success": False, "message": "停止失败"}), 500
+
+
+@app.route("/api/realtime/tasks/<task_id>/stats", methods=["GET"])
+@login_required
+def get_realtime_task_stats(task_id):
+    """获取实时同步任务的统计信息。"""
+    task = db2_store.get_realtime_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权查看此任务"}), 403
+
+    runtime_stats = get_realtime_stats(task_id) or {}
+    stored_stats = task.get("stats", {})
+
+    stats = {
+        **stored_stats,
+        **runtime_stats,
+        "task_id": task_id,
+        "status": task.get("status"),
+        "message": task.get("message"),
+        "binlog_file": task.get("binlog_file"),
+        "binlog_pos": task.get("binlog_pos"),
+    }
+
+    return jsonify({"success": True, "stats": stats})
+
+
+@app.route("/api/realtime/tasks/<task_id>", methods=["DELETE"])
+@login_required
+def delete_realtime_task(task_id):
+    """删除实时同步任务。"""
+    task = db2_store.get_realtime_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    stop_realtime_sync(task_id)
+
+    if db2_store.delete_realtime_task(task_id):
+        logger.info("实时任务已删除: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "实时任务已删除"})
+    return jsonify({"success": False, "message": "删除失败"}), 500
+
+
+@app.route("/api/realtime/dashboard", methods=["GET"])
+@login_required
+def get_realtime_dashboard():
+    """获取实时同步仪表盘数据。"""
+    tasks = db2_store.list_realtime_tasks(request.username)
+    running_count = sum(1 for t in tasks if t.get("status") == "running")
+    total_events = sum(t.get("stats", {}).get("total_events", 0) for t in tasks)
+    synced_events = sum(t.get("stats", {}).get("synced_events", 0) for t in tasks)
+
+    stats = {
+        "total_tasks": len(tasks),
+        "running_tasks": running_count,
+        "stopped_tasks": len(tasks) - running_count,
+        "total_events": total_events,
+        "synced_events": synced_events,
+        "failed_events": total_events - synced_events,
+    }
+
+    return jsonify({
+        "success": True,
+        "stats": stats,
+        "recent_tasks": tasks[:5],
     })
 
 

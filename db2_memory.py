@@ -1,7 +1,10 @@
 import threading
 import time
+import logging
 from datetime import datetime
 from typing import Optional, Dict, List, Any
+
+logger = logging.getLogger(__name__)
 
 
 class DB2MemoryStore:
@@ -22,6 +25,7 @@ class DB2MemoryStore:
         self._sync_progress: Dict[str, Dict] = {}
         self._sync_tasks: Dict[str, Dict] = {}
         self._sessions: Dict[str, Dict] = {}
+        self._realtime_tasks: Dict[str, Dict] = {}
         self._init_default_data()
 
     def _init_default_data(self):
@@ -208,6 +212,97 @@ class DB2MemoryStore:
                 "percentage": round(percentage, 2)
             }
         }
+
+    # ------------------------------------------------------------------ #
+    #                        实时同步任务管理
+    # ------------------------------------------------------------------ #
+
+    def create_realtime_task(self, task_id: str, config_name: str, username: str) -> Dict:
+        """
+        创建实时同步任务。
+
+        Args:
+            task_id: 任务 ID
+            config_name: 配置名称
+            username: 创建者用户名
+
+        Returns:
+            任务信息字典
+        """
+        self._realtime_tasks[task_id] = {
+            "task_id": task_id,
+            "config_name": config_name,
+            "username": username,
+            "status": "pending",
+            "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "stopped_at": None,
+            "message": "实时任务已创建",
+            "binlog_file": "",
+            "binlog_pos": 0,
+            "stats": {
+                "total_events": 0,
+                "insert_events": 0,
+                "update_events": 0,
+                "delete_events": 0,
+                "synced_events": 0,
+                "failed_events": 0,
+            },
+        }
+        logger.info("创建实时任务: %s (配置: %s, 用户: %s)", task_id, config_name, username)
+        return self._realtime_tasks[task_id]
+
+    def get_realtime_task(self, task_id: str) -> Optional[Dict]:
+        """获取指定实时任务。"""
+        return self._realtime_tasks.get(task_id)
+
+    def list_realtime_tasks(self, username: Optional[str] = None) -> List[Dict]:
+        """列出所有实时任务。"""
+        tasks = list(self._realtime_tasks.values())
+        if username:
+            tasks = [t for t in tasks if t["username"] == username]
+        return sorted(tasks, key=lambda x: x["created_at"], reverse=True)
+
+    def update_realtime_task(self, task_id: str, **kwargs):
+        """更新实时任务信息。"""
+        if task_id in self._realtime_tasks:
+            self._realtime_tasks[task_id].update(kwargs)
+            self._realtime_tasks[task_id]["updated_at"] = datetime.now().isoformat()
+            logger.debug("更新实时任务: %s, 字段: %s", task_id, list(kwargs.keys()))
+
+    def update_realtime_task_stats(self, task_id: str, stats: Dict[str, Any]):
+        """更新实时任务统计信息。"""
+        if task_id in self._realtime_tasks:
+            self._realtime_tasks[task_id]["stats"].update({
+                "total_events": stats.get("total_events", 0),
+                "insert_events": stats.get("insert_events", 0),
+                "update_events": stats.get("update_events", 0),
+                "delete_events": stats.get("delete_events", 0),
+                "synced_events": stats.get("synced_events", 0),
+                "failed_events": stats.get("failed_events", 0),
+            })
+            if stats.get("current_binlog_file"):
+                self._realtime_tasks[task_id]["binlog_file"] = stats["current_binlog_file"]
+            if stats.get("current_binlog_pos"):
+                self._realtime_tasks[task_id]["binlog_pos"] = stats["current_binlog_pos"]
+
+    def get_realtime_task_binlog_position(self, task_id: str) -> Optional[Dict[str, Any]]:
+        """获取实时任务的 binlog 断点位置。"""
+        task = self.get_realtime_task(task_id)
+        if task and task.get("binlog_file"):
+            return {
+                "log_file": task["binlog_file"],
+                "log_pos": task.get("binlog_pos", 0),
+            }
+        return None
+
+    def delete_realtime_task(self, task_id: str) -> bool:
+        """删除实时任务。"""
+        if task_id in self._realtime_tasks:
+            del self._realtime_tasks[task_id]
+            logger.info("删除实时任务: %s", task_id)
+            return True
+        return False
 
 
 db2_store = DB2MemoryStore()

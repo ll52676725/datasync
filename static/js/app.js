@@ -20,7 +20,8 @@ const pageTitles = {
     dashboard: { title: '仪表盘', subtitle: '查看同步系统概览' },
     configs: { title: '配置管理', subtitle: '管理数据库同步配置' },
     tasks: { title: '任务监控', subtitle: '监控和管理同步任务' },
-    progress: { title: '断点续传', subtitle: '管理同步断点和进度' }
+    progress: { title: '断点续传', subtitle: '管理同步断点和进度' },
+    realtime: { title: '实时同步', subtitle: '管理实时 CDC 数据同步' }
 };
 
 document.addEventListener('DOMContentLoaded', function() {
@@ -62,6 +63,7 @@ function switchTab(tab) {
     if (tab === 'tasks') loadTasks();
     if (tab === 'progress') loadProgress();
     if (tab === 'dashboard') loadDashboard();
+    if (tab === 'realtime') loadRealtimeTasks();
 }
 
 function initConfigTabs() {
@@ -1027,5 +1029,318 @@ document.addEventListener('keydown', function(e) {
     if (e.key === 'Escape') {
         document.querySelectorAll('.modal.active').forEach(m => m.classList.remove('active'));
         closeTaskDetailModal();
+        closeRealtimeDetailModal();
     }
 });
+
+// ====================================================================== //
+//                        实时同步功能
+// ====================================================================== //
+
+let realtimePollingInterval = null;
+let currentRealtimeTaskId = null;
+
+async function loadRealtimeTasks() {
+    const data = await apiRequest('/api/realtime/dashboard');
+    if (!data || !data.success) return;
+
+    const stats = data.stats;
+    document.getElementById('realtimeTotalTasks').textContent = stats.total_tasks;
+    document.getElementById('realtimeRunning').textContent = stats.running_tasks;
+    document.getElementById('realtimeTotalEvents').textContent = formatNumber(stats.total_events);
+    document.getElementById('realtimeSyncedEvents').textContent = formatNumber(stats.synced_events);
+
+    const container = document.getElementById('realtimeTasksList');
+    const tasks = data.recent_tasks || [];
+
+    if (tasks.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="10"></circle>
+                    <polyline points="12 6 12 12 16 14"></polyline>
+                </svg>
+                <h4>暂无实时任务</h4>
+                <p>创建您的第一个实时同步任务</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = tasks.map(task => `
+        <div class="task-card">
+            <div class="task-header">
+                <div class="task-title">
+                    <h4>${task.config_name}</h4>
+                    <span>创建时间: ${formatDate(task.created_at)}</span>
+                </div>
+                <div class="task-actions">
+                    ${task.status === 'running' ? `
+                        <button class="icon-btn" onclick="stopRealtimeTask('${task.task_id}')" title="停止">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <rect x="6" y="6" width="12" height="12" rx="2"></rect>
+                            </svg>
+                        </button>
+                    ` : `
+                        <button class="icon-btn" onclick="startRealtimeTask('${task.task_id}')" title="启动">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                            </svg>
+                        </button>
+                    `}
+                    <button class="icon-btn" onclick="viewRealtimeTaskDetail('${task.task_id}')" title="查看详情">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"></path>
+                            <circle cx="12" cy="12" r="3"></circle>
+                        </svg>
+                    </button>
+                    <button class="icon-btn danger" onclick="deleteRealtimeTask('${task.task_id}')" title="删除">
+                        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <polyline points="3 6 5 6 21 6"></polyline>
+                            <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                        </svg>
+                    </button>
+                </div>
+            </div>
+            <div class="task-details">
+                <div class="detail-item">
+                    <span class="label">状态</span>
+                    <span class="value">${getStatusBadge(task.status)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">消息</span>
+                    <span class="value" style="font-family: inherit;">${task.message || '-'}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">总事件数</span>
+                    <span class="value">${formatNumber(task.stats?.total_events || 0)}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">已同步</span>
+                    <span class="value">${formatNumber(task.stats?.synced_events || 0)}</span>
+                </div>
+                ${task.binlog_file ? `
+                <div class="detail-item">
+                    <span class="label">Binlog 位置</span>
+                    <span class="value" style="font-family: inherit;">${task.binlog_file}:${task.binlog_pos}</span>
+                </div>
+                ` : ''}
+            </div>
+        </div>
+    `).join('');
+}
+
+function showRealtimeTaskModal() {
+    const modal = document.getElementById('realtimeTaskModal');
+    const select = document.getElementById('realtimeConfigSelect');
+    
+    select.innerHTML = '<option value="">请选择配置...</option>';
+    
+    apiRequest('/api/configs').then(data => {
+        if (data && data.success) {
+            data.configs.forEach(config => {
+                const srcType = config.config.source?.type || 'mysql';
+                if (srcType === 'mysql') {
+                    const option = document.createElement('option');
+                    option.value = config.name;
+                    option.textContent = config.name;
+                    select.appendChild(option);
+                }
+            });
+        }
+    });
+
+    modal.classList.add('active');
+}
+
+function closeRealtimeTaskModal() {
+    document.getElementById('realtimeTaskModal').classList.remove('active');
+}
+
+async function createRealtimeTask() {
+    const configName = document.getElementById('realtimeConfigSelect').value;
+    if (!configName) {
+        showToast('请选择配置', 'error');
+        return;
+    }
+
+    const mode = document.querySelector('input[name="realtimeMode"]:checked').value;
+    const resumeFromBinlog = mode === 'resume';
+
+    try {
+        const createData = await apiRequest('/api/realtime/tasks', 'POST', { config_name: configName });
+        if (!createData || !createData.success) {
+            showToast(createData?.message || '创建实时任务失败', 'error');
+            return;
+        }
+
+        const taskId = createData.task.task_id;
+        const startData = await apiRequest(`/api/realtime/tasks/${taskId}/start`, 'POST', {
+            resume_from_binlog: resumeFromBinlog
+        });
+
+        if (startData && startData.success) {
+            showToast('实时任务已启动', 'success');
+            closeRealtimeTaskModal();
+            loadRealtimeTasks();
+            setTimeout(() => viewRealtimeTaskDetail(taskId), 500);
+        } else {
+            showToast(startData?.message || '启动实时任务失败', 'error');
+            loadRealtimeTasks();
+        }
+    } catch (error) {
+        console.error('createRealtimeTask 错误:', error);
+        showToast('创建实时任务时出错: ' + error.message, 'error');
+    }
+}
+
+async function startRealtimeTask(taskId) {
+    const data = await apiRequest(`/api/realtime/tasks/${taskId}/start`, 'POST', {
+        resume_from_binlog: true
+    });
+    if (data && data.success) {
+        showToast('实时任务已启动', 'success');
+        loadRealtimeTasks();
+    } else {
+        showToast(data?.message || '启动失败', 'error');
+    }
+}
+
+async function stopRealtimeTask(taskId) {
+    if (!confirm('确定要停止此实时任务吗？')) return;
+
+    const data = await apiRequest(`/api/realtime/tasks/${taskId}/stop`, 'POST');
+    if (data && data.success) {
+        showToast('正在停止实时任务...', 'info');
+        setTimeout(() => loadRealtimeTasks(), 2000);
+    }
+}
+
+async function deleteRealtimeTask(taskId) {
+    if (!confirm('确定要删除此实时任务吗？')) return;
+
+    const data = await apiRequest(`/api/realtime/tasks/${taskId}`, 'DELETE');
+    if (data && data.success) {
+        showToast('实时任务已删除', 'success');
+        loadRealtimeTasks();
+    }
+}
+
+async function viewRealtimeTaskDetail(taskId) {
+    currentRealtimeTaskId = taskId;
+    const modal = document.getElementById('realtimeDetailModal');
+    const content = document.getElementById('realtimeDetailContent');
+
+    modal.classList.add('active');
+
+    await refreshRealtimeTaskDetail(taskId);
+
+    if (realtimePollingInterval) {
+        clearInterval(realtimePollingInterval);
+    }
+    
+    realtimePollingInterval = setInterval(() => {
+        if (document.getElementById('realtimeDetailModal').classList.contains('active')) {
+            refreshRealtimeTaskDetail(taskId);
+        } else {
+            clearInterval(realtimePollingInterval);
+            realtimePollingInterval = null;
+        }
+    }, 2000);
+}
+
+async function refreshRealtimeTaskDetail(taskId) {
+    const data = await apiRequest(`/api/realtime/tasks/${taskId}/stats`);
+    if (!data || !data.success) return;
+
+    const stats = data.stats;
+    const content = document.getElementById('realtimeDetailContent');
+
+    document.getElementById('realtimeDetailTitle').textContent = `实时任务详情 - ${taskId.substring(0, 8)}...`;
+
+    content.innerHTML = `
+        <div style="margin-bottom: 24px;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 16px;">
+                <div>
+                    <h3 style="margin-bottom: 8px;">同步状态</h3>
+                    <p style="color: var(--text-secondary);">${stats.message || ''}</p>
+                </div>
+                ${getStatusBadge(stats.status)}
+            </div>
+        </div>
+
+        <div class="config-details" style="margin-bottom: 24px;">
+            <div class="detail-item">
+                <span class="label">总事件数</span>
+                <span class="value">${formatNumber(stats.total_events || 0)}</span>
+            </div>
+            <div class="detail-item">
+                <span class="label">INSERT 事件</span>
+                <span class="value">${formatNumber(stats.insert_events || 0)}</span>
+            </div>
+            <div class="detail-item">
+                <span class="label">UPDATE 事件</span>
+                <span class="value">${formatNumber(stats.update_events || 0)}</span>
+            </div>
+            <div class="detail-item">
+                <span class="label">DELETE 事件</span>
+                <span class="value">${formatNumber(stats.delete_events || 0)}</span>
+            </div>
+            <div class="detail-item">
+                <span class="label">已同步</span>
+                <span class="value" style="color: var(--success-color);">${formatNumber(stats.synced_events || 0)}</span>
+            </div>
+            <div class="detail-item">
+                <span class="label">失败事件</span>
+                <span class="value" style="color: var(--danger-color);">${formatNumber(stats.failed_events || 0)}</span>
+            </div>
+            ${stats.queue_size !== undefined ? `
+            <div class="detail-item">
+                <span class="label">队列大小</span>
+                <span class="value">${stats.queue_size}</span>
+            </div>
+            ` : ''}
+            ${stats.running_time !== undefined ? `
+            <div class="detail-item">
+                <span class="label">运行时间</span>
+                <span class="value">${formatDuration(stats.running_time)}</span>
+            </div>
+            ` : ''}
+        </div>
+
+        ${stats.binlog_file ? `
+        <div style="border-top: 1px solid var(--border-color); padding-top: 20px;">
+            <h4 style="margin-bottom: 16px;">Binlog 位置</h4>
+            <div class="config-details">
+                <div class="detail-item">
+                    <span class="label">日志文件</span>
+                    <span class="value" style="font-family: monospace;">${stats.binlog_file}</span>
+                </div>
+                <div class="detail-item">
+                    <span class="label">位置</span>
+                    <span class="value" style="font-family: monospace;">${stats.binlog_pos}</span>
+                </div>
+            </div>
+        </div>
+        ` : ''}
+    `;
+}
+
+function formatDuration(seconds) {
+    if (!seconds || seconds < 0) return '-';
+    const h = Math.floor(seconds / 3600);
+    const m = Math.floor((seconds % 3600) / 60);
+    const s = Math.floor(seconds % 60);
+    if (h > 0) return `${h}时${m}分${s}秒`;
+    if (m > 0) return `${m}分${s}秒`;
+    return `${s}秒`;
+}
+
+function closeRealtimeDetailModal() {
+    document.getElementById('realtimeDetailModal').classList.remove('active');
+    if (realtimePollingInterval) {
+        clearInterval(realtimePollingInterval);
+        realtimePollingInterval = null;
+    }
+    currentRealtimeTaskId = null;
+}

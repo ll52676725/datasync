@@ -54,6 +54,14 @@
                     </svg>
                     <span>断点续传</span>
                 </a>
+                <a href="#" class="nav-item" data-tab="realtime">
+                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <polyline points="12 6 12 12 16 14"></polyline>
+                        <path d="M12 2a10 10 0 1 0 10 10"></path>
+                    </svg>
+                    <span>实时同步</span>
+                </a>
             </nav>
             
             <div class="sidebar-footer">
@@ -235,6 +243,74 @@
                         </div>
                     </div>
                 </section>
+
+                <section id="tab-realtime" class="tab-content">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>实时同步任务</h3>
+                            <button class="btn-primary" onclick="showRealtimeTaskModal()">新建实时任务</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="alert-info">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <polyline points="12 6 12 12 16 14"></polyline>
+                                </svg>
+                                <p>基于 MySQL binlog 的 CDC 实时数据同步。支持 INSERT/UPDATE/DELETE 事件的增量捕获和同步。</p>
+                            </div>
+                            
+                            <div class="stats-grid" style="margin-bottom: 24px;">
+                                <div class="stat-card">
+                                    <div class="stat-icon bg-blue">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <circle cx="12" cy="12" r="10"></circle>
+                                        </svg>
+                                    </div>
+                                    <div class="stat-content">
+                                        <p class="stat-label">总任务数</p>
+                                        <h3 class="stat-value" id="realtimeTotalTasks">0</h3>
+                                    </div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-icon bg-green">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polygon points="5 3 19 12 5 21 5 3"></polygon>
+                                        </svg>
+                                    </div>
+                                    <div class="stat-content">
+                                        <p class="stat-label">运行中</p>
+                                        <h3 class="stat-value" id="realtimeRunning">0</h3>
+                                    </div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-icon bg-purple">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                                        </svg>
+                                    </div>
+                                    <div class="stat-content">
+                                        <p class="stat-label">同步事件</p>
+                                        <h3 class="stat-value" id="realtimeTotalEvents">0</h3>
+                                    </div>
+                                </div>
+                                <div class="stat-card">
+                                    <div class="stat-icon bg-orange">
+                                        <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <polyline points="20 6 9 17 4 12"></polyline>
+                                        </svg>
+                                    </div>
+                                    <div class="stat-content">
+                                        <p class="stat-label">成功事件</p>
+                                        <h3 class="stat-value" id="realtimeSyncedEvents">0</h3>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div id="realtimeTasksList" class="realtime-tasks-list">
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </div>
         </main>
     </div>
@@ -404,6 +480,68 @@
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn-secondary" onclick="closeTaskDetailModal()">关闭</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="realtimeTaskModal" class="modal">
+        <div class="modal-content" style="max-width: 500px;">
+            <div class="modal-header">
+                <h3>新建实时同步任务</h3>
+                <button class="modal-close" onclick="closeRealtimeTaskModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="alert-info" style="margin-bottom: 20px;">
+                    <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <circle cx="12" cy="12" r="10"></circle>
+                        <line x1="12" y1="16" x2="12" y2="12"></line>
+                        <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                    </svg>
+                    <p>实时同步要求源数据库为 MySQL，且已开启 binlog。建议先执行全量批量同步，再启动实时增量同步。</p>
+                </div>
+                <div class="form-group">
+                    <label>选择配置</label>
+                    <select id="realtimeConfigSelect">
+                        <option value="">请选择配置...</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label>恢复模式</label>
+                    <div class="radio-group">
+                        <label class="radio-item">
+                            <input type="radio" name="realtimeMode" value="new" checked>
+                            <span>
+                                <strong>全新启动</strong>
+                                <small>从当前 binlog 位置开始监听</small>
+                            </span>
+                        </label>
+                        <label class="radio-item">
+                            <input type="radio" name="realtimeMode" value="resume">
+                            <span>
+                                <strong>断点恢复</strong>
+                                <small>从上次停止的位置继续同步</small>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeRealtimeTaskModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="createRealtimeTask()">创建并启动</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="realtimeDetailModal" class="modal">
+        <div class="modal-content" style="max-width: 700px;">
+            <div class="modal-header">
+                <h3 id="realtimeDetailTitle">实时任务详情</h3>
+                <button class="modal-close" onclick="closeRealtimeDetailModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="realtimeDetailContent">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeRealtimeDetailModal()">关闭</button>
             </div>
         </div>
     </div>

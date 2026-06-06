@@ -276,6 +276,72 @@ class BaseDBAdapter(ABC):
         """
         ...
 
+    # ------------------------------------------------------------------ #
+    #                        CDC (Change Data Capture)
+    # ------------------------------------------------------------------ #
+
+    def supports_cdc(self) -> bool:
+        """
+        检查该数据库是否支持 CDC 实时捕获。
+
+        Returns:
+            True 表示支持 CDC，False 表示不支持
+        """
+        return False
+
+    def create_cdc_stream(self, tables: List[str], callback, **kwargs):
+        """
+        创建 CDC 数据流，用于实时捕获数据变更。
+
+        Args:
+            tables: 需要监听的表名列表
+            callback: 变更事件回调函数，参数为 (event_type, table_name, data)
+            **kwargs: 额外的 CDC 配置参数
+
+        Returns:
+            CDC 流对象，可用于停止监听
+
+        Raises:
+            NotImplementedError: 如果该数据库不支持 CDC
+        """
+        raise NotImplementedError(f"CDC 未在 {self.__class__.__name__} 中实现")
+
+    def get_current_binlog_position(self, conn) -> Optional[Dict[str, Any]]:
+        """
+        获取当前 binlog 位置（用于 CDC 断点续传）。
+
+        Args:
+            conn: 数据库连接
+
+        Returns:
+            binlog 位置信息字典，不支持则返回 None
+        """
+        return None
+
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
+        """
+        插入或更新一行数据（用于 CDC 同步 INSERT/UPDATE 事件）。
+
+        Args:
+            conn: 数据库连接
+            table_name: 表名
+            data: 行数据字典
+            primary_key: 主键列名
+        """
+        raise NotImplementedError(f"upsert_row 未在 {self.__class__.__name__} 中实现")
+
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
+        """
+        删除一行数据（用于 CDC 同步 DELETE 事件）。
+
+        Args:
+            conn: 数据库连接
+            table_name: 表名
+            primary_key: 主键列名
+            pk_value: 主键值
+        """
+        raise NotImplementedError(f"delete_row 未在 {self.__class__.__name__} 中实现")
+
 
 # ====================================================================== #
 #                        MySQL 适配器实现
@@ -477,6 +543,144 @@ class MySQLAdapter(BaseDBAdapter):
 
     def quote_identifier(self, name: str) -> str:
         return f"`{name}`"
+
+    # ------------------------------------------------------------------ #
+    #                        CDC (Change Data Capture)
+    # ------------------------------------------------------------------ #
+
+    def supports_cdc(self) -> bool:
+        return True
+
+    def create_cdc_stream(self, tables: List[str], callback, **kwargs):
+        """
+        创建 MySQL binlog 数据流。
+
+        使用 pymysqlreplication 库监听 binlog 事件。
+        需要 MySQL 服务器开启 binlog，且用户具有 REPLICATION SLAVE 和 REPLICATION CLIENT 权限。
+
+        Args:
+            tables: 要监听的表名列表，格式: ["db.table1", "db.table2"] 或 ["table1", "table2"]
+            callback: 事件回调函数，参数: (event_type, table_name, data)
+                      event_type: "insert", "update", "delete"
+            **kwargs: 可选参数
+                      - server_id: MySQL 从服务器 ID，默认 100
+                      - blocking: 是否阻塞，默认 True
+                      - only_schemas: 监听的数据库列表
+                      - resume_stream: 是否从上次位置继续
+                      - log_file: binlog 文件名（断点续传用）
+                      - log_pos: binlog 位置（断点续传用）
+
+        Returns:
+            BinLogStreamReader 对象，调用 stream.close() 停止
+        """
+        from pymysqlreplication import BinLogStreamReader
+        from pymysqlreplication.row_event import (
+            DeleteRowsEvent,
+            UpdateRowsEvent,
+            WriteRowsEvent,
+        )
+
+        server_id = kwargs.get("server_id", 100)
+        blocking = kwargs.get("blocking", True)
+        only_schemas = kwargs.get("only_schemas", [self.cfg["database"]])
+        only_tables = kwargs.get("only_tables", tables)
+        resume_stream = kwargs.get("resume_stream", False)
+        log_file = kwargs.get("log_file")
+        log_pos = kwargs.get("log_pos")
+
+        mysql_settings = {
+            "host": self.cfg["host"],
+            "port": int(self.cfg["port"]),
+            "user": self.cfg["user"],
+            "passwd": self.cfg["password"],
+        }
+
+        stream = BinLogStreamReader(
+            connection_settings=mysql_settings,
+            server_id=server_id,
+            blocking=blocking,
+            resume_stream=resume_stream,
+            only_schemas=only_schemas,
+            only_tables=only_tables if only_tables else None,
+            log_file=log_file,
+            log_pos=log_pos,
+        )
+
+        def _event_processor():
+            for binlog_event in stream:
+                try:
+                    if isinstance(binlog_event, WriteRowsEvent):
+                        event_type = "insert"
+                        for row in binlog_event.rows:
+                            callback(event_type, binlog_event.table, row["values"])
+                    elif isinstance(binlog_event, UpdateRowsEvent):
+                        event_type = "update"
+                        for row in binlog_event.rows:
+                            callback(event_type, binlog_event.table, row["after_values"])
+                    elif isinstance(binlog_event, DeleteRowsEvent):
+                        event_type = "delete"
+                        for row in binlog_event.rows:
+                            callback(event_type, binlog_event.table, row["values"])
+                except Exception as e:
+                    logger.error("处理 binlog 事件出错: %s", e)
+                    continue
+
+        import threading
+        t = threading.Thread(target=_event_processor, daemon=True)
+        t.start()
+
+        return stream, t
+
+    def get_current_binlog_position(self, conn) -> Optional[Dict[str, Any]]:
+        """获取当前 binlog 位置。"""
+        try:
+            cur = conn.cursor()
+            cur.execute("SHOW MASTER STATUS")
+            row = cur.fetchone()
+            cur.close()
+            if row:
+                return {
+                    "log_file": row[0],
+                    "log_pos": row[1],
+                    "binlog_do_db": row[2] if len(row) > 2 else "",
+                    "binlog_ignore_db": row[3] if len(row) > 3 else "",
+                }
+            return None
+        except Exception as e:
+            logger.error("获取 binlog 位置失败: %s", e)
+            return None
+
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
+        """MySQL 插入或更新一行数据。"""
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        columns = list(data.keys())
+        values = list(data.values())
+
+        col_list = ", ".join(self.quote_identifier(c) for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        update_list = ", ".join(f"{self.quote_identifier(c)} = %s" for c in columns)
+
+        sql = f"""
+            INSERT INTO {qt} ({col_list}) VALUES ({placeholders})
+            ON DUPLICATE KEY UPDATE {update_list}
+        """
+
+        cur = conn.cursor()
+        cur.execute(sql, values + values)
+        conn.commit()
+        cur.close()
+
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
+        """MySQL 删除一行数据。"""
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        sql = f"DELETE FROM {qt} WHERE {qpk} = %s"
+
+        cur = conn.cursor()
+        cur.execute(sql, (pk_value,))
+        conn.commit()
+        cur.close()
 
 
 # ====================================================================== #
@@ -735,6 +939,52 @@ class DB2Adapter(BaseDBAdapter):
 
     def quote_identifier(self, name: str) -> str:
         return f'"{name}"'
+
+    # ------------------------------------------------------------------ #
+    #                        CDC (Change Data Capture)
+    # ------------------------------------------------------------------ #
+
+    def supports_cdc(self) -> bool:
+        return False
+
+    def upsert_row(self, conn, table_name: str, data: Dict[str, Any], primary_key: str):
+        """DB2 插入或更新一行数据（使用 MERGE 语句）。"""
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        columns = list(data.keys())
+        values = list(data.values())
+        pk_value = data.get(primary_key)
+
+        col_list = ", ".join(self.quote_identifier(c) for c in columns)
+        placeholders = ", ".join(["?"] * len(columns))
+        update_list = ", ".join(f"{self.quote_identifier(c)} = ?" for c in columns if c != primary_key)
+        update_values = [v for k, v in data.items() if k != primary_key]
+
+        sql = f"""
+            MERGE INTO {qt} AS t
+            USING (VALUES (?)) AS s({qpk})
+            ON t.{qpk} = s.{qpk}
+            WHEN MATCHED THEN
+                UPDATE SET {update_list}
+            WHEN NOT MATCHED THEN
+                INSERT ({col_list}) VALUES ({placeholders})
+        """
+
+        cur = conn.cursor()
+        cur.execute(sql, [pk_value] + update_values + values)
+        conn.commit()
+        cur.close()
+
+    def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any):
+        """DB2 删除一行数据。"""
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        sql = f"DELETE FROM {qt} WHERE {qpk} = ?"
+
+        cur = conn.cursor()
+        cur.execute(sql, (pk_value,))
+        conn.commit()
+        cur.close()
 
 
 # ====================================================================== #

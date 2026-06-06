@@ -2,3 +2,4 @@ pymysql>=1.1.0
 PyYAML>=6.0
 Flask>=3.0.0
 ibm-db>=3.2.3
+mysql-replication>=0.44.0
