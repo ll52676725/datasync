@@ -186,10 +186,62 @@ def test_cross_db_conversion():
     return all_passed
 
 
+def test_auto_increment():
+    """测试自增主键在各数据库中的转换。"""
+    print("\n" + "="*80)
+    print("测试 4: 自增主键 DDL 转换测试")
+    print("="*80)
+    
+    schema = TableSchema(
+        table_name="test_auto_inc",
+        source_db_type="mysql",
+        columns=[
+            ColumnSchema(
+                name="id",
+                data_type=StandardDataType.BIGINT,
+                nullable=False,
+                is_primary_key=True,
+                auto_increment=True,
+                comment="自增主键"
+            ),
+            ColumnSchema(
+                name="name",
+                data_type=StandardDataType.VARCHAR,
+                length=100,
+                nullable=False,
+                comment="名称"
+            ),
+        ],
+        primary_keys=["id"]
+    )
+    
+    expected_patterns = {
+        "mysql": "AUTO_INCREMENT",
+        "db2": "GENERATED ALWAYS AS IDENTITY",
+        "oracle": "GENERATED ALWAYS AS IDENTITY",
+    }
+    
+    all_passed = True
+    for db_type in ["mysql", "db2", "oracle"]:
+        ddl = convert_ddl(schema, db_type)
+        pattern = expected_patterns[db_type]
+        passed = pattern in ddl
+        status = "✓" if passed else "✗"
+        print(f"\n  {status} {db_type.upper()} 自增主键:")
+        print(f"    期望包含: {pattern}")
+        print(f"    DDL 片段: ...{ddl[ddl.lower().find('id'):ddl.lower().find('id')+120]}...")
+        if not passed:
+            all_passed = False
+            print(f"    ✗ 未找到期望的自增语法!")
+    
+    print(f"\n自增主键测试: {'全部通过' if all_passed else '存在失败'}")
+    return all_passed
+
+
 def test_standard_type_roundtrip():
     """测试标准类型往返转换。"""
     print("\n" + "="*80)
-    print("测试 4: 标准类型往返转换测试")
+    print("测试 5: 标准类型往返转换测试")
     print("="*80)
     
     test_types = [
@@ -227,6 +279,7 @@ def main():
     results.append(("数据类型映射", test_data_type_mapping()))
     results.append(("DDL 生成", test_ddl_generation()))
     results.append(("跨库转换", test_cross_db_conversion()))
+    results.append(("自增主键", test_auto_increment()))
     results.append(("类型往返", test_standard_type_roundtrip()))
     
     print("\n" + "="*80)

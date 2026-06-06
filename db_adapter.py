@@ -1121,7 +1121,7 @@ class DB2Adapter(BaseDBAdapter):
         cur.execute(
             """
             SELECT COLNAME, TYPENAME, LENGTH, SCALE, NULLS, DEFAULT,
-                   REMARKS, COLNO
+                   REMARKS, COLNO, GENERATED
             FROM SYSCAT.COLUMNS
             WHERE TABSCHEMA = ? AND TABNAME = ?
             ORDER BY COLNO
@@ -1148,7 +1148,7 @@ class DB2Adapter(BaseDBAdapter):
                 pk_cols = [c.strip() for c in pk_str.split("+")]
         
         for col_info in columns_info:
-            col_name, type_name, length, scale, nulls, default_val, remarks, colno = col_info
+            col_name, type_name, length, scale, nulls, default_val, remarks, colno, generated = col_info
             
             original_type = type_name.strip().upper()
             
@@ -1161,6 +1161,7 @@ class DB2Adapter(BaseDBAdapter):
             )
             
             is_pk = col_name.strip().upper() in [p.upper() for p in pk_cols]
+            is_auto_inc = generated and generated.strip() in ('A', 'D')
             
             column = ColumnSchema(
                 name=col_name.strip(),
@@ -1172,7 +1173,7 @@ class DB2Adapter(BaseDBAdapter):
                 default_value=default_val.strip() if default_val and default_val.strip() else None,
                 is_primary_key=is_pk,
                 comment=remarks.strip() if remarks and remarks.strip() else None,
-                auto_increment=False,
+                auto_increment=is_auto_inc,
                 original_db_type=original_type
             )
             schema.columns.append(column)
@@ -1563,6 +1564,21 @@ class OracleAdapter(BaseDBAdapter):
         
         cur = conn.cursor()
         
+        identity_cols = set()
+        try:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME
+                FROM ALL_TAB_IDENTITY_COLS
+                WHERE OWNER = :1 AND TABLE_NAME = :2
+                """,
+                (self.schema, table_upper),
+            )
+            for row in cur.fetchall():
+                identity_cols.add(row[0].strip().upper())
+        except Exception:
+            pass
+        
         cur.execute(
             """
             SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION,
@@ -1594,6 +1610,7 @@ class OracleAdapter(BaseDBAdapter):
             data_scale, nullable, data_default, column_id = col_info
             
             original_type = data_type.strip().upper()
+            col_name_upper = col_name.strip().upper()
             
             std_type, params = DataTypeMapper.to_standard(
                 "oracle",
@@ -1603,7 +1620,8 @@ class OracleAdapter(BaseDBAdapter):
                 scale=data_scale
             )
             
-            is_pk = col_name.strip().upper() in [p.upper() for p in pk_cols]
+            is_pk = col_name_upper in [p.upper() for p in pk_cols]
+            is_auto_inc = col_name_upper in identity_cols
             
             column = ColumnSchema(
                 name=col_name.strip(),
@@ -1615,7 +1633,7 @@ class OracleAdapter(BaseDBAdapter):
                 default_value=str(data_default).strip() if data_default and str(data_default).strip() else None,
                 is_primary_key=is_pk,
                 comment=None,
-                auto_increment=False,
+                auto_increment=is_auto_inc,
                 original_db_type=original_type
             )
             schema.columns.append(column)
@@ -1623,8 +1641,8 @@ class OracleAdapter(BaseDBAdapter):
         schema.primary_keys = pk_cols
         cur.close()
         
-        logger.debug("Oracle 读取表 %s 元数据: %d 列, 主键: %s",
-                     table_name, len(schema.columns), schema.primary_keys)
+        logger.debug("Oracle 读取表 %s 元数据: %d 列, 主键: %s, 自增列: %s",
+                     table_name, len(schema.columns), schema.primary_keys, identity_cols)
         return schema
 
     def fetch_chunk(self, conn, table_name: str, columns: List[str],

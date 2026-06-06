@@ -655,10 +655,12 @@ class DB2DDLGenerator(DDLGenerator):
         
         parts = [self.quote_identifier(column.name), type_def]
         
-        if not column.nullable:
+        if column.auto_increment:
+            parts.append("GENERATED ALWAYS AS IDENTITY")
+        elif not column.nullable:
             parts.append("NOT NULL")
         
-        if column.default_value is not None:
+        if not column.auto_increment and column.default_value is not None:
             parts.append(f"WITH DEFAULT {column.default_value}")
         
         return " ".join(parts)
@@ -708,10 +710,12 @@ class OracleDDLGenerator(DDLGenerator):
         
         parts = [self.quote_identifier(column.name), type_def]
         
-        if not column.nullable:
+        if column.auto_increment:
+            parts.append("GENERATED ALWAYS AS IDENTITY")
+        elif not column.nullable:
             parts.append("NOT NULL")
         
-        if column.default_value is not None:
+        if not column.auto_increment and column.default_value is not None:
             parts.append(f"DEFAULT {column.default_value}")
         
         return " ".join(parts)
