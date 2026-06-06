@@ -39,6 +39,11 @@ from realtime_sync_engine import (
     get_realtime_stats,
     list_running_realtime_tasks,
 )
+from sync_orchestrator import (
+    smart_sync_manager,
+    start_smart_sync,
+    stop_smart_sync,
+)
 from logger_utils import setup_logger
 
 setup_logger(level=logging.INFO)
@@ -607,6 +612,217 @@ def get_realtime_dashboard():
         "total_events": total_events,
         "synced_events": synced_events,
         "failed_events": total_events - synced_events,
+    }
+
+    return jsonify({
+        "success": True,
+        "stats": stats,
+        "recent_tasks": tasks[:5],
+    })
+
+
+# ====================================================================== #
+#                        智能同步（三阶段编排）API
+# ====================================================================== #
+
+@app.route("/api/smart-sync/tasks", methods=["GET"])
+@login_required
+def list_smart_sync_tasks():
+    """列出当前用户的所有智能同步任务。"""
+    tasks = db2_store.list_smart_sync_tasks(request.username)
+    return jsonify({"success": True, "tasks": tasks})
+
+
+@app.route("/api/smart-sync/tasks", methods=["POST"])
+@login_required
+def create_smart_sync_task():
+    """
+    创建新的智能同步任务（三阶段编排）。
+
+    请求体:
+    {
+        "config_name": "配置名称",
+        "quick_days": 7  # 可选，快速增量同步天数，默认 7
+    }
+    """
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "请求数据为空"}), 400
+
+    config_name = data.get("config_name", "").strip()
+    quick_days = int(data.get("quick_days", 7))
+
+    if not config_name:
+        return jsonify({"success": False, "message": "请选择配置"}), 400
+
+    config = db2_store.get_config(config_name)
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    src_type = config["source"].get("type", "mysql").lower()
+    src_adapter = get_adapter(config["source"])
+    if not src_adapter.supports_cdc():
+        logger.warning(
+            "源数据库类型 '%s' 不支持实时同步，智能同步将仅执行前两阶段",
+            src_type,
+        )
+
+    task_id = str(uuid.uuid4())
+    task = db2_store.create_smart_sync_task(
+        task_id, config_name, request.username, quick_days=quick_days,
+    )
+    logger.info(
+        "智能同步任务已创建: %s (配置: %s, 快速天数: %d, 用户: %s)",
+        task_id, config_name, quick_days, request.username,
+    )
+
+    return jsonify({"success": True, "message": "智能同步任务创建成功", "task": task})
+
+
+@app.route("/api/smart-sync/tasks/<task_id>/start", methods=["POST"])
+@login_required
+def start_smart_sync_task(task_id):
+    """启动智能同步任务。"""
+    task = db2_store.get_smart_sync_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    running_tasks = smart_sync_manager.list_running_tasks()
+    if task_id in running_tasks:
+        return jsonify({"success": False, "message": "任务已在运行中"}), 400
+
+    config = db2_store.get_config(task["config_name"])
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    quick_days = task.get("quick_days", 7)
+    db2_store.update_realtime_task(
+        task_id, status="starting", message="正在启动智能同步...",
+    )
+
+    success = smart_sync_manager.start_smart_sync(
+        task_id, config, quick_days=quick_days,
+    )
+    if success:
+        logger.info("智能同步任务已启动: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "智能同步已启动"})
+    else:
+        db2_store.update_realtime_task(task_id, status="failed", message="启动失败")
+        return jsonify({"success": False, "message": "智能同步启动失败"}), 500
+
+
+@app.route("/api/smart-sync/tasks/<task_id>/stop", methods=["POST"])
+@login_required
+def stop_smart_sync_task(task_id):
+    """停止智能同步任务。"""
+    task = db2_store.get_smart_sync_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    success = stop_smart_sync(task_id)
+    if success:
+        db2_store.update_realtime_task(
+            task_id,
+            status="stopped",
+            stopped_at=datetime.now().isoformat(),
+            message="智能同步已停止",
+        )
+        logger.info("智能同步任务已停止: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "智能同步已停止"})
+    else:
+        return jsonify({"success": False, "message": "停止失败"}), 500
+
+
+@app.route("/api/smart-sync/tasks/<task_id>/stats", methods=["GET"])
+@login_required
+def get_smart_sync_task_stats(task_id):
+    """获取智能同步任务的统计信息和阶段进度。"""
+    task = db2_store.get_smart_sync_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权查看此任务"}), 403
+
+    runtime_stats = get_realtime_stats(task_id) or {}
+    stored_stats = task.get("stats", {})
+
+    phase_progress = task.get("phase_progress", {})
+    current_phase = task.get("current_phase", "pending")
+
+    phase_names = {
+        "quick_incremental": "阶段一：快速增量",
+        "full_backfill": "阶段二：存量补全",
+        "realtime": "阶段三：实时同步",
+    }
+
+    stats = {
+        **stored_stats,
+        **runtime_stats,
+        "task_id": task_id,
+        "status": task.get("status"),
+        "message": task.get("message"),
+        "current_phase": current_phase,
+        "current_phase_name": phase_names.get(current_phase, current_phase),
+        "quick_days": task.get("quick_days", 7),
+        "binlog_file": task.get("binlog_file"),
+        "binlog_pos": task.get("binlog_pos"),
+        "phase_progress": phase_progress,
+        "phase_names": phase_names,
+    }
+
+    return jsonify({"success": True, "stats": stats})
+
+
+@app.route("/api/smart-sync/tasks/<task_id>", methods=["DELETE"])
+@login_required
+def delete_smart_sync_task(task_id):
+    """删除智能同步任务。"""
+    task = db2_store.get_smart_sync_task(task_id)
+    if not task:
+        return jsonify({"success": False, "message": "任务不存在"}), 404
+
+    if task["username"] != request.username:
+        return jsonify({"success": False, "message": "无权操作此任务"}), 403
+
+    stop_smart_sync(task_id)
+
+    if db2_store.delete_realtime_task(task_id):
+        logger.info("智能同步任务已删除: %s (用户: %s)", task_id, request.username)
+        return jsonify({"success": True, "message": "智能同步任务已删除"})
+    return jsonify({"success": False, "message": "删除失败"}), 500
+
+
+@app.route("/api/smart-sync/dashboard", methods=["GET"])
+@login_required
+def get_smart_sync_dashboard():
+    """获取智能同步仪表盘数据。"""
+    tasks = db2_store.list_smart_sync_tasks(request.username)
+    running_count = sum(1 for t in tasks if t.get("status") == "running")
+    completed_count = sum(1 for t in tasks if t.get("status") == "completed")
+
+    phase_counts = {
+        "quick_incremental": 0,
+        "full_backfill": 0,
+        "realtime": 0,
+    }
+    for t in tasks:
+        phase = t.get("current_phase")
+        if phase in phase_counts:
+            phase_counts[phase] += 1
+
+    stats = {
+        "total_tasks": len(tasks),
+        "running_tasks": running_count,
+        "completed_tasks": completed_count,
+        "failed_tasks": sum(1 for t in tasks if t.get("status") == "failed"),
+        "phase_counts": phase_counts,
     }
 
     return jsonify({

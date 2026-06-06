@@ -304,5 +304,94 @@ class DB2MemoryStore:
             return True
         return False
 
+    # ------------------------------------------------------------------ #
+    #                     智能同步（三阶段编排）任务管理
+    # ------------------------------------------------------------------ #
+
+    def create_smart_sync_task(self, task_id: str, config_name: str, username: str,
+                               quick_days: int = 7) -> Dict:
+        """
+        创建智能同步任务（三阶段编排）。
+
+        Args:
+            task_id: 任务 ID
+            config_name: 配置名称
+            username: 创建者用户名
+            quick_days: 快速增量阶段同步最近 N 天的数据
+
+        Returns:
+            任务信息字典
+        """
+        self._realtime_tasks[task_id] = {
+            "task_id": task_id,
+            "config_name": config_name,
+            "username": username,
+            "type": "smart_sync",
+            "status": "pending",
+            "current_phase": "pending",
+            "quick_days": quick_days,
+            "created_at": datetime.now().isoformat(),
+            "started_at": None,
+            "finished_at": None,
+            "message": "智能同步任务已创建",
+            "binlog_file": "",
+            "binlog_pos": 0,
+            "phase_progress": {
+                "quick_incremental": {"status": "pending", "progress": 0, "message": ""},
+                "full_backfill": {"status": "pending", "progress": 0, "message": ""},
+                "realtime": {"status": "pending", "progress": 0, "message": ""},
+            },
+            "stats": {
+                "total_events": 0,
+                "insert_events": 0,
+                "update_events": 0,
+                "delete_events": 0,
+                "synced_events": 0,
+                "failed_events": 0,
+            },
+        }
+        logger.info("创建智能同步任务: %s (配置: %s, 用户: %s, 快速同步天数: %d)",
+                    task_id, config_name, username, quick_days)
+        return self._realtime_tasks[task_id]
+
+    def update_smart_sync_phase(self, task_id: str, phase: str, status: str,
+                                progress: float = 0, message: str = ""):
+        """
+        更新智能同步任务的阶段状态。
+
+        Args:
+            task_id: 任务 ID
+            phase: 阶段名称 (quick_incremental/full_backfill/realtime)
+            status: 状态 (pending/running/completed/failed)
+            progress: 进度百分比 0-100
+            message: 阶段消息
+        """
+        if task_id in self._realtime_tasks:
+            task = self._realtime_tasks[task_id]
+            task["phase_progress"][phase] = {
+                "status": status,
+                "progress": progress,
+                "message": message,
+                "updated_at": datetime.now().isoformat(),
+            }
+            task["current_phase"] = phase
+            task["updated_at"] = datetime.now().isoformat()
+            if status == "running":
+                task["status"] = "running"
+            logger.debug("更新智能同步任务阶段: %s, 阶段=%s, 状态=%s, 进度=%.1f%%",
+                         task_id, phase, status, progress)
+
+    def get_smart_sync_task(self, task_id: str) -> Optional[Dict]:
+        """获取智能同步任务（与实时任务共享存储）。"""
+        task = self.get_realtime_task(task_id)
+        if task and task.get("type") == "smart_sync":
+            return task
+        return None
+
+    def list_smart_sync_tasks(self, username: Optional[str] = None) -> List[Dict]:
+        """列出所有智能同步任务。"""
+        tasks = self.list_realtime_tasks(username)
+        return [t for t in tasks if t.get("type") == "smart_sync"]
+
 
 db2_store = DB2MemoryStore()
