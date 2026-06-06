@@ -123,13 +123,13 @@ class RealtimeSyncEngineOptimized:
         self._event_merge_buffer: Dict[Tuple[str, Any], CDCEvent] = {}
         self._merge_lock = threading.Lock()
 
-        enable_batch_upsert = self.sync_cfg.get("enable_batch_upsert", True)
-        self.enable_batch_upsert = enable_batch_upsert and self.tgt_adapter.db_type == "mysql"
+        self.enable_batch_upsert = self.sync_cfg.get("enable_batch_upsert", True)
+        self.enable_batch_delete = self.sync_cfg.get("enable_batch_delete", True)
 
         logger.info(
-            "[优化版] 实时同步引擎初始化完成: %s → %s, 表数: %d, 背压=%s, 事件合并=%s, 批量upsert=%s",
+            "[优化版] 实时同步引擎初始化完成: %s → %s, 表数: %d, 背压=%s, 事件合并=%s, 批量upsert=%s, 批量delete=%s",
             self.src_adapter.db_type, self.tgt_adapter.db_type, len(self.tables),
-            enable_backpressure, self.enable_event_merge, self.enable_batch_upsert,
+            enable_backpressure, self.enable_event_merge, self.enable_batch_upsert, self.enable_batch_delete,
         )
 
     def _init_primary_keys(self):
@@ -268,15 +268,13 @@ class RealtimeSyncEngineOptimized:
 
     def _process_batch(self, events: List[CDCEvent]):
         """
-        批量处理 CDC 事件（优化版 - 事务安全）。
-
-        支持按表批量 upsert，提升写入性能。
+        批量处理 CDC 事件（优化版 - 全数据库类型支持）。
 
         核心改进：
-        1. 逐表处理，批量 upsert 成功后立即 commit 并更新位置
-        2. 逐行模式下每行成功后立即 commit 并更新位置（已在 _sync_table_events_optimized 中处理）
+        1. 统一使用 adapter 的 batch_upsert/batch_delete 接口，支持 MySQL/DB2/Oracle
+        2. 按操作类型分组批量处理，大幅提升性能
         3. 异常时保存最后成功位置，避免重复消费
-        4. 确保顺序：先 commit 数据，再更新位置（数据优先原则）
+        4. 失败自动降级为逐行处理，保证数据不丢失
         """
         if not events:
             return
@@ -299,60 +297,13 @@ class RealtimeSyncEngineOptimized:
                     logger.warning("表 %s 无主键，跳过同步", table_name)
                     continue
 
-                insert_events = []
-                update_events = []
-                delete_events = []
-                for event in table_events:
-                    if event.event_type == CDCAction.INSERT:
-                        insert_events.append(event)
-                    elif event.event_type == CDCAction.UPDATE:
-                        update_events.append(event)
-                    elif event.event_type == CDCAction.DELETE:
-                        delete_events.append(event)
-
-                batch_upsert_success = False
-                if self.enable_batch_upsert and (insert_events or update_events):
-                    all_upsert = insert_events + update_events
-                    success, error = self.retry_mgr.execute_with_retry(
-                        self._batch_upsert_mysql,
-                        tgt_conn, table_name, all_upsert, pk_col,
-                    )
-                    if success:
-                        try:
-                            tgt_conn.commit()
-                            table_success_count += len(all_upsert)
-                            table_last_success = all_upsert[-1]
-                            batch_upsert_success = True
-                            logger.debug("批量 upsert 提交成功: 表 %s, %d 行", table_name, len(all_upsert))
-                        except Exception as commit_err:
-                            logger.error("批量 upsert commit 失败: %s", commit_err)
-                            batch_upsert_success = False
-                    else:
-                        logger.warning("批量 upsert 执行失败，降级为逐行处理: %s", error)
-                        batch_upsert_success = False
-
-                if not batch_upsert_success:
-                    all_events = insert_events + update_events + delete_events
-                    for event in all_events:
-                        try:
-                            if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
-                                ok = self._upsert_with_retry(tgt_conn, table_name, event, pk_col, auto_commit=True)
-                            else:
-                                ok = self._delete_with_retry(tgt_conn, table_name, event, pk_col, auto_commit=True)
-                            if ok:
-                                table_success_count += 1
-                                table_last_success = event
-                                self._update_position_from_event(event)
-                        except Exception as row_err:
-                            logger.error("逐行处理失败: table=%s, pk=%s, error=%s",
-                                         table_name, event.data.get(pk_col), row_err)
-                            continue
+                table_success_count, table_last_success = self._sync_table_events_optimized(
+                    tgt_conn, table_name, table_events, pk_col
+                )
 
                 if table_last_success is not None:
                     last_successful_event = table_last_success
                     processed_count += table_success_count
-                    if batch_upsert_success:
-                        self._update_position_from_event(table_last_success)
 
             self.stats["synced_events"] += processed_count
             self.stats["last_sync_time"] = time.time()
@@ -380,100 +331,103 @@ class RealtimeSyncEngineOptimized:
                 pass
             self.tgt_adapter.close_connection(tgt_conn)
 
-    def _sync_table_events_optimized(self, conn, table_name: str, events: List[CDCEvent]) -> Tuple[int, Optional[CDCEvent]]:
+    def _sync_table_events_optimized(self, conn, table_name: str, events: List[CDCEvent], pk_col: str) -> Tuple[int, Optional[CDCEvent]]:
         """
-        优化版单表 CDC 事件同步（事务增强版）。
+        优化版单表 CDC 事件同步（全数据库类型支持）。
 
-        核心改进：
-        1. 统一事务边界：整个表的处理在一个事务中，成功后统一 commit
-        2. 精确位置跟踪：每成功一批立即更新位置，确保崩溃后精确恢复
-        3. 部分成功处理：逐行模式下每行成功后立即 commit 并更新位置
-
-        支持：
-        - MySQL 批量 upsert
-        - 失败重试
-        - 死信队列
+        策略：
+        1. INSERT/UPDATE 事件使用 batch_upsert 批量处理
+        2. DELETE 事件使用 batch_delete 批量处理
+        3. 批量失败自动降级为逐行处理
+        4. 支持所有数据库类型（MySQL/DB2/Oracle）
 
         Returns:
             (成功行数, 最后成功事件) 元组
         """
-        pk_col = self.table_primary_keys.get(table_name)
-        if not pk_col:
-            logger.warning("表 %s 无主键，跳过同步", table_name)
-            return (0, None)
-
         success_count = 0
         last_success: Optional[CDCEvent] = None
 
-        insert_events = []
-        update_events = []
+        insert_update_events = []
         delete_events = []
 
         for event in events:
-            if event.event_type == CDCAction.INSERT:
-                insert_events.append(event)
-            elif event.event_type == CDCAction.UPDATE:
-                update_events.append(event)
+            if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
+                insert_update_events.append(event)
             elif event.event_type == CDCAction.DELETE:
                 delete_events.append(event)
 
-        if self.enable_batch_upsert and (insert_events or update_events):
-            all_upsert = insert_events + update_events
-            success, error = self.retry_mgr.execute_with_retry(
-                self._batch_upsert_mysql,
-                conn, table_name, all_upsert, pk_col,
-            )
-            if success:
-                success_count += len(all_upsert)
-                last_success = all_upsert[-1]
-            else:
-                logger.warning("批量 upsert 失败，降级为逐行事务处理: %s", error)
-                for event in all_upsert:
+        if insert_update_events:
+            try:
+                columns = list(insert_update_events[0].data.keys())
+                rows = []
+                for event in insert_update_events:
+                    row = tuple(event.data.get(c) for c in columns)
+                    rows.append(row)
+
+                success, error = self.retry_mgr.execute_with_retry(
+                    lambda: self.tgt_adapter.batch_upsert(
+                        conn, table_name, columns, rows, pk_col, auto_commit=False
+                    )
+                )
+                if success:
+                    conn.commit()
+                    success_count += len(insert_update_events)
+                    last_success = insert_update_events[-1]
+                    self._update_position_from_event(last_success)
+                    logger.debug("批量 upsert 成功: 表 %s, %d 行", table_name, len(insert_update_events))
+                else:
+                    logger.warning("批量 upsert 失败，降级为逐行处理: %s", error)
+                    for event in insert_update_events:
+                        if self._upsert_with_retry(conn, table_name, event, pk_col, auto_commit=True):
+                            success_count += 1
+                            last_success = event
+                            self._update_position_from_event(event)
+            except Exception as e:
+                logger.warning("批量 upsert 异常，降级为逐行处理: %s", e)
+                for event in insert_update_events:
                     if self._upsert_with_retry(conn, table_name, event, pk_col, auto_commit=True):
                         success_count += 1
                         last_success = event
                         self._update_position_from_event(event)
-        else:
-            for event in insert_events + update_events:
-                if self._upsert_with_retry(conn, table_name, event, pk_col, auto_commit=True):
-                    success_count += 1
-                    last_success = event
-                    self._update_position_from_event(event)
 
-        for event in delete_events:
-            if self._delete_with_retry(conn, table_name, event, pk_col, auto_commit=True):
-                success_count += 1
-                last_success = event
-                self._update_position_from_event(event)
+        if delete_events:
+            try:
+                pk_values = []
+                valid_delete_events = []
+                for event in delete_events:
+                    pk_value = event.data.get(pk_col)
+                    if pk_value is not None:
+                        pk_values.append(pk_value)
+                        valid_delete_events.append(event)
+
+                if pk_values:
+                    success, error = self.retry_mgr.execute_with_retry(
+                        lambda: self.tgt_adapter.batch_delete(
+                            conn, table_name, pk_col, pk_values, auto_commit=False
+                        )
+                    )
+                    if success:
+                        conn.commit()
+                        success_count += len(valid_delete_events)
+                        last_success = valid_delete_events[-1]
+                        self._update_position_from_event(last_success)
+                        logger.debug("批量 delete 成功: 表 %s, %d 行", table_name, len(valid_delete_events))
+                    else:
+                        logger.warning("批量 delete 失败，降级为逐行处理: %s", error)
+                        for event in valid_delete_events:
+                            if self._delete_with_retry(conn, table_name, event, pk_col, auto_commit=True):
+                                success_count += 1
+                                last_success = event
+                                self._update_position_from_event(event)
+            except Exception as e:
+                logger.warning("批量 delete 异常，降级为逐行处理: %s", e)
+                for event in delete_events:
+                    if self._delete_with_retry(conn, table_name, event, pk_col, auto_commit=True):
+                        success_count += 1
+                        last_success = event
+                        self._update_position_from_event(event)
 
         return (success_count, last_success)
-
-    def _batch_upsert_mysql(self, conn, table_name: str, events: List[CDCEvent], pk_col: str):
-        """MySQL 批量 upsert 优化（不自动 commit，由调用方控制事务）。"""
-        if not events:
-            return
-
-        qt = self.tgt_adapter.quote_identifier(table_name)
-        columns = list(events[0].data.keys())
-        col_list = ", ".join(self.tgt_adapter.quote_identifier(c) for c in columns)
-        placeholders = ", ".join(["%s"] * len(columns))
-        update_list = ", ".join(
-            f"{self.tgt_adapter.quote_identifier(c)} = VALUES({self.tgt_adapter.quote_identifier(c)})"
-            for c in columns
-        )
-
-        sql = f"""
-            INSERT INTO {qt} ({col_list}) VALUES ({placeholders})
-            ON DUPLICATE KEY UPDATE {update_list}
-        """
-
-        rows = []
-        for event in events:
-            rows.append(tuple(event.data.get(c) for c in columns))
-
-        with conn.cursor() as cur:
-            cur.executemany(sql, rows)
-        logger.debug("批量 upsert 表 %s: %d 行", table_name, len(rows))
 
     def _upsert_with_retry(self, conn, table_name: str, event: CDCEvent, pk_col: str, auto_commit: bool = False) -> bool:
         """带重试的 upsert。
