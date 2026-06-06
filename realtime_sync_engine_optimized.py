@@ -155,7 +155,8 @@ class RealtimeSyncEngineOptimized:
         except Exception:
             return 0.0
 
-    def _on_cdc_event(self, event_type: str, table_name: str, data: Dict[str, Any]):
+    def _on_cdc_event(self, event_type: str, table_name: str, data: Dict[str, Any],
+                       event_meta: Dict[str, Any] = None):
         """
         CDC 事件回调函数（优化版）。
 
@@ -166,6 +167,11 @@ class RealtimeSyncEngineOptimized:
 
         if self.tables and table_name not in self.tables:
             return
+
+        event_meta = event_meta or {}
+        binlog_file = event_meta.get("binlog_file", "")
+        binlog_pos = event_meta.get("binlog_pos", 0)
+        scn = event_meta.get("scn")
 
         memory_mb = self._get_memory_usage_mb()
         self.stats["memory_usage_mb"] = memory_mb
@@ -190,7 +196,12 @@ class RealtimeSyncEngineOptimized:
             event_type=event_type,
             table_name=table_name,
             data=data,
+            binlog_file=binlog_file,
+            binlog_pos=binlog_pos,
         )
+        if scn is not None:
+            event.scn = scn
+            self.stats["current_scn"] = scn
 
         if self.enable_event_merge:
             with self._merge_lock:
@@ -210,6 +221,8 @@ class RealtimeSyncEngineOptimized:
                                 binlog_file=event.binlog_file,
                                 binlog_pos=event.binlog_pos,
                             )
+                            if hasattr(event, 'scn'):
+                                new_event.scn = event.scn
                             self._event_merge_buffer[key] = new_event
                         else:
                             self._event_merge_buffer[key] = event
@@ -263,6 +276,8 @@ class RealtimeSyncEngineOptimized:
             if hasattr(last_event, 'binlog_file') and last_event.binlog_file:
                 self.stats["current_binlog_file"] = last_event.binlog_file
                 self.stats["current_binlog_pos"] = last_event.binlog_pos
+            if hasattr(last_event, 'scn') and last_event.scn is not None:
+                self.stats["current_scn"] = last_event.scn
 
             if self.task_id:
                 db2_store.update_realtime_task_stats(self.task_id, self.stats)
@@ -525,9 +540,12 @@ class RealtimeSyncEngineOptimized:
                 update_kwargs["binlog_file"] = ""
                 update_kwargs["binlog_pos"] = 0
                 update_kwargs["current_scn"] = self.stats.get("current_scn", 0)
+                logger.info("[优化版] 保存 Oracle 断点: SCN=%d", update_kwargs["current_scn"])
             else:
                 update_kwargs["binlog_file"] = self.stats["current_binlog_file"]
                 update_kwargs["binlog_pos"] = self.stats["current_binlog_pos"]
+                logger.info("[优化版] 保存 MySQL 断点: %s @ %d",
+                            update_kwargs["binlog_file"], update_kwargs["binlog_pos"])
             db2_store.update_realtime_task(self.task_id, **update_kwargs)
 
         dlq_stats = self.retry_mgr.get_stats()

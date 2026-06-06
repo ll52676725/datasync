@@ -71,54 +71,197 @@ class PerformanceMetrics:
 #                        1. 大事务拆分器
 # ====================================================================== #
 
+@dataclass
+class TransactionalRow:
+    """
+    带事务上下文的数据行。
+
+    用于在拆分时保持事务边界感知。
+    """
+    row: Tuple
+    transaction_id: Optional[str] = None  # 源事务ID（MySQL: XID, Oracle: XID）
+    table_name: Optional[str] = None
+    operation: Optional[str] = None  # insert/update/delete
+    safe_point: Optional[Any] = None  # 安全点（如PK值、binlog位置、SCN）
+    timestamp: float = field(default_factory=time.time)
+
+
+@dataclass
+class SplitBoundary:
+    """
+    拆分边界定义。
+
+    描述一个拆分批次的边界信息，用于断点续传和一致性保证。
+    """
+    batch_id: int
+    start_safe_point: Optional[Any] = None
+    end_safe_point: Optional[Any] = None
+    row_count: int = 0
+    transaction_ids: List[str] = field(default_factory=list)
+    committed: bool = False
+    commit_time: Optional[float] = None
+
+
 class TransactionSplitter:
     """
-    大事务拆分器。
+    增强版大事务拆分器。
 
-    功能：
-    - 控制单事务最大行数，避免目标库大事务锁表
-    - 自动拆分超大型批次为多个子事务
-    - 记录每个子事务进度，支持断点续传
+    核心特性：
+    1. **事务边界感知**：优先在事务边界拆分，避免同一源事务被拆分
+    2. **并发事务隔离**：按事务ID分组，支持并发事务的有序提交
+    3. **安全点机制**：每个拆分批次记录安全点，支持精确断点续传
+    4. **双阈值触发**：行数阈值 + 时间阈值，避免长事务
+
+    拆分边界界定规则：
+    - 硬边界（必须拆分）：当前批次行数 >= max_transaction_rows
+    - 软边界（优先拆分）：遇到新事务ID且当前批次已有数据
+    - 时间边界：距离上次提交超过 commit_interval_ms
     """
 
     def __init__(self, max_transaction_rows: int = 1000,
-                 commit_interval_ms: int = 0):
+                 commit_interval_ms: int = 0,
+                 respect_transaction_boundary: bool = True,
+                 allow_split_large_transaction: bool = True):
         """
         初始化事务拆分器。
 
         Args:
-            max_transaction_rows: 单事务最大行数
+            max_transaction_rows: 单事务最大行数（硬边界）
             commit_interval_ms: 强制提交间隔（毫秒），0表示不按时间提交
+            respect_transaction_boundary: 是否尊重事务边界（尽量不拆分同一源事务）
+            allow_split_large_transaction: 是否允许拆分超大事务
+                                           （超过 max_transaction_rows 的单个事务仍会被拆分）
         """
         self.max_transaction_rows = max_transaction_rows
         self.commit_interval_ms = commit_interval_ms
-        self._current_batch: List[Tuple] = []
+        self.respect_transaction_boundary = respect_transaction_boundary
+        self.allow_split_large_transaction = allow_split_large_transaction
+
+        self._current_batch: List[TransactionalRow] = []
+        self._current_txn_ids: set = set()
         self._last_commit_time = time.time()
+        self._batch_id_counter = 0
+        self._boundary_history: List[SplitBoundary] = []
+        self._current_start_safe_point: Optional[Any] = None
         self._lock = threading.Lock()
 
-    def add_row(self, row: Tuple) -> bool:
+    def add_row(self, row: Tuple,
+                transaction_id: Optional[str] = None,
+                table_name: Optional[str] = None,
+                operation: Optional[str] = None,
+                safe_point: Optional[Any] = None) -> bool:
         """
         添加一行到当前批次。
 
+        Args:
+            row: 数据行
+            transaction_id: 源事务ID（用于事务边界识别）
+            table_name: 表名
+            operation: 操作类型
+            safe_point: 安全点（用于断点续传的精确位置）
+
         Returns:
-            True 表示需要立即提交（达到阈值）
+            True 表示需要立即提交（达到拆分边界）
         """
         with self._lock:
-            self._current_batch.append(row)
-            need_commit = (
-                len(self._current_batch) >= self.max_transaction_rows or
-                (self.commit_interval_ms > 0 and
-                 (time.time() - self._last_commit_time) * 1000 >= self.commit_interval_ms)
+            tx_row = TransactionalRow(
+                row=row,
+                transaction_id=transaction_id,
+                table_name=table_name,
+                operation=operation,
+                safe_point=safe_point,
             )
-            return need_commit
 
-    def get_batch_and_reset(self) -> List[Tuple]:
-        """获取当前批次并重置。"""
+            if len(self._current_batch) == 0:
+                self._current_start_safe_point = safe_point
+
+            self._current_batch.append(tx_row)
+            if transaction_id:
+                self._current_txn_ids.add(transaction_id)
+
+            return self._check_should_commit(transaction_id)
+
+    def _check_should_commit(self, new_transaction_id: Optional[str]) -> bool:
+        """
+        内部方法：检查是否应该提交当前批次。
+
+        判定优先级：
+        1. 硬边界（行数超限）> 2. 事务边界 > 3. 时间边界
+        """
+        current_size = len(self._current_batch)
+
+        if current_size >= self.max_transaction_rows:
+            if not self.allow_split_large_transaction and len(self._current_txn_ids) == 1:
+                return False
+            return True
+
+        if (self.respect_transaction_boundary and
+                new_transaction_id and
+                current_size > 0 and
+                self._current_txn_ids and
+                new_transaction_id not in self._current_txn_ids):
+            return True
+
+        if self.commit_interval_ms > 0:
+            elapsed_ms = (time.time() - self._last_commit_time) * 1000
+            if elapsed_ms >= self.commit_interval_ms and current_size > 0:
+                return True
+
+        return False
+
+    def get_batch_and_reset(self) -> Tuple[List[Tuple], SplitBoundary]:
+        """
+        获取当前批次数据并重置，同时返回拆分边界信息。
+
+        Returns:
+            (rows_list, split_boundary) 元组
+        """
         with self._lock:
-            batch = self._current_batch.copy()
+            rows = [tx_row.row for tx_row in self._current_batch]
+
+            end_safe_point = None
+            if self._current_batch:
+                end_safe_point = self._current_batch[-1].safe_point
+
+            boundary = SplitBoundary(
+                batch_id=self._batch_id_counter,
+                start_safe_point=self._current_start_safe_point,
+                end_safe_point=end_safe_point,
+                row_count=len(self._current_batch),
+                transaction_ids=list(self._current_txn_ids),
+            )
+
+            self._batch_id_counter += 1
+            self._boundary_history.append(boundary)
+
             self._current_batch.clear()
+            self._current_txn_ids.clear()
+            self._current_start_safe_point = None
             self._last_commit_time = time.time()
-            return batch
+
+            return rows, boundary
+
+    def mark_batch_committed(self, batch_id: int):
+        """标记批次已提交，更新边界记录。"""
+        with self._lock:
+            for boundary in self._boundary_history:
+                if boundary.batch_id == batch_id:
+                    boundary.committed = True
+                    boundary.commit_time = time.time()
+                    break
+
+    def get_last_committed_boundary(self) -> Optional[SplitBoundary]:
+        """获取最后一个成功提交的批次边界。"""
+        with self._lock:
+            for boundary in reversed(self._boundary_history):
+                if boundary.committed:
+                    return boundary
+            return None
+
+    def get_uncommitted_boundaries(self) -> List[SplitBoundary]:
+        """获取所有未提交的批次边界（异常恢复时使用）。"""
+        with self._lock:
+            return [b for b in self._boundary_history if not b.committed]
 
     def has_pending(self) -> bool:
         """检查是否有待提交数据。"""
@@ -130,18 +273,83 @@ class TransactionSplitter:
         with self._lock:
             return len(self._current_batch)
 
-    def split_rows(self, rows: List[Tuple]) -> Generator[List[Tuple], None, None]:
+    def split_rows(self, rows: List[Tuple],
+                   safe_points: Optional[List[Any]] = None,
+                   transaction_ids: Optional[List[str]] = None) -> Generator[Tuple[List[Tuple], SplitBoundary], None, None]:
         """
-        将大数据集拆分为多个小批次。
+        将大数据集拆分为多个小批次（带边界信息）。
 
         Args:
             rows: 原始数据行列表
+            safe_points: 每行对应的安全点列表（用于断点续传）
+            transaction_ids: 每行对应的事务ID列表
 
         Yields:
-            拆分后的小批次
+            (rows_batch, split_boundary) 元组
         """
-        for i in range(0, len(rows), self.max_transaction_rows):
-            yield rows[i:i + self.max_transaction_rows]
+        current_batch: List[TransactionalRow] = []
+        current_txn_ids: set = set()
+        batch_start_safe = None
+        batch_id = 0
+
+        for i, row in enumerate(rows):
+            sp = safe_points[i] if safe_points and i < len(safe_points) else None
+            tx_id = transaction_ids[i] if transaction_ids and i < len(transaction_ids) else None
+
+            tx_row = TransactionalRow(
+                row=row,
+                transaction_id=tx_id,
+                safe_point=sp,
+            )
+
+            if len(current_batch) == 0:
+                batch_start_safe = sp
+
+            current_batch.append(tx_row)
+            if tx_id:
+                current_txn_ids.add(tx_id)
+
+            need_split = len(current_batch) >= self.max_transaction_rows
+
+            if need_split:
+                end_sp = current_batch[-1].safe_point
+                boundary = SplitBoundary(
+                    batch_id=batch_id,
+                    start_safe_point=batch_start_safe,
+                    end_safe_point=end_sp,
+                    row_count=len(current_batch),
+                    transaction_ids=list(current_txn_ids),
+                )
+                yield [r.row for r in current_batch], boundary
+
+                batch_id += 1
+                current_batch = []
+                current_txn_ids = set()
+                batch_start_safe = None
+
+        if current_batch:
+            end_sp = current_batch[-1].safe_point
+            boundary = SplitBoundary(
+                batch_id=batch_id,
+                start_safe_point=batch_start_safe,
+                end_safe_point=end_sp,
+                row_count=len(current_batch),
+                transaction_ids=list(current_txn_ids),
+            )
+            yield [r.row for r in current_batch], boundary
+
+    def get_stats(self) -> Dict[str, Any]:
+        """获取拆分器统计信息。"""
+        with self._lock:
+            committed = sum(1 for b in self._boundary_history if b.committed)
+            return {
+                "total_batches": len(self._boundary_history),
+                "committed_batches": committed,
+                "pending_batches": len(self._boundary_history) - committed,
+                "current_pending_rows": len(self._current_batch),
+                "max_transaction_rows": self.max_transaction_rows,
+                "respect_transaction_boundary": self.respect_transaction_boundary,
+            }
 
 
 # ====================================================================== #

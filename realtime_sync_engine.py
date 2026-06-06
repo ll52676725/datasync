@@ -143,11 +143,18 @@ class RealtimeSyncEngine:
     #                        CDC 事件回调
     # ------------------------------------------------------------------ #
 
-    def _on_cdc_event(self, event_type: str, table_name: str, data: Dict[str, Any]):
+    def _on_cdc_event(self, event_type: str, table_name: str, data: Dict[str, Any],
+                       event_meta: Dict[str, Any] = None):
         """
         CDC 事件回调函数。
 
         将捕获到的事件放入处理队列。
+
+        Args:
+            event_type: 事件类型 insert/update/delete
+            table_name: 表名
+            data: 行数据
+            event_meta: 事件元数据，包含 binlog_file/binlog_pos (MySQL) 或 scn (Oracle)
         """
         if self.stop_flag["stop"]:
             return
@@ -155,11 +162,23 @@ class RealtimeSyncEngine:
         if self.tables and table_name not in self.tables:
             return
 
+        event_meta = event_meta or {}
+
+        binlog_file = event_meta.get("binlog_file", "")
+        binlog_pos = event_meta.get("binlog_pos", 0)
+        scn = event_meta.get("scn")
+
         event = CDCEvent(
             event_type=event_type,
             table_name=table_name,
             data=data,
+            binlog_file=binlog_file,
+            binlog_pos=binlog_pos,
         )
+
+        if scn is not None:
+            event.scn = scn
+            self.stats["current_scn"] = scn
 
         try:
             self.event_queue.put(event, block=False)
@@ -203,6 +222,8 @@ class RealtimeSyncEngine:
             if hasattr(last_event, 'binlog_file') and last_event.binlog_file:
                 self.stats["current_binlog_file"] = last_event.binlog_file
                 self.stats["current_binlog_pos"] = last_event.binlog_pos
+            if hasattr(last_event, 'scn') and last_event.scn is not None:
+                self.stats["current_scn"] = last_event.scn
 
             if self.task_id:
                 db2_store.update_realtime_task_stats(self.task_id, self.stats)
@@ -419,9 +440,12 @@ class RealtimeSyncEngine:
                 update_kwargs["binlog_file"] = ""
                 update_kwargs["binlog_pos"] = 0
                 update_kwargs["current_scn"] = self.stats.get("current_scn", 0)
+                logger.info("保存 Oracle 断点: SCN=%d", update_kwargs["current_scn"])
             else:
                 update_kwargs["binlog_file"] = self.stats["current_binlog_file"]
                 update_kwargs["binlog_pos"] = self.stats["current_binlog_pos"]
+                logger.info("保存 MySQL 断点: %s @ %d",
+                            update_kwargs["binlog_file"], update_kwargs["binlog_pos"])
             db2_store.update_realtime_task(self.task_id, **update_kwargs)
 
         logger.info("实时同步已停止")

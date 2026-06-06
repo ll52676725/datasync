@@ -281,24 +281,28 @@ class DB2MemoryStore:
                 "synced_events": stats.get("synced_events", 0),
                 "failed_events": stats.get("failed_events", 0),
             })
-            if stats.get("current_binlog_file"):
+            if "current_binlog_file" in stats and stats["current_binlog_file"] is not None:
                 self._realtime_tasks[task_id]["binlog_file"] = stats["current_binlog_file"]
-            if stats.get("current_binlog_pos"):
+            if "current_binlog_pos" in stats and stats["current_binlog_pos"] is not None:
                 self._realtime_tasks[task_id]["binlog_pos"] = stats["current_binlog_pos"]
+            if "current_scn" in stats and stats["current_scn"] is not None:
+                self._realtime_tasks[task_id]["current_scn"] = stats["current_scn"]
 
     def get_realtime_task_binlog_position(self, task_id: str) -> Optional[Dict[str, Any]]:
         """获取实时任务的断点位置（支持 MySQL binlog 和 Oracle SCN）。"""
         task = self.get_realtime_task(task_id)
         if not task:
             return None
-        if task.get("current_scn"):
+        if task.get("current_scn") is not None and task["current_scn"] > 0:
             return {
                 "current_scn": task["current_scn"],
             }
-        if task.get("binlog_file"):
+        binlog_file = task.get("binlog_file", "")
+        binlog_pos = task.get("binlog_pos", 0)
+        if binlog_file and binlog_pos > 0:
             return {
-                "log_file": task["binlog_file"],
-                "log_pos": task.get("binlog_pos", 0),
+                "log_file": binlog_file,
+                "log_pos": binlog_pos,
             }
         return None
 

@@ -590,8 +590,9 @@ class MySQLAdapter(BaseDBAdapter):
 
         Args:
             tables: 要监听的表名列表，格式: ["db.table1", "db.table2"] 或 ["table1", "table2"]
-            callback: 事件回调函数，参数: (event_type, table_name, data)
+            callback: 事件回调函数，参数: (event_type, table_name, data, event_meta)
                       event_type: "insert", "update", "delete"
+                      event_meta: 包含 binlog_file, binlog_pos, gtid, xid 等元数据
             **kwargs: 可选参数
                       - server_id: MySQL 从服务器 ID，默认 100
                       - blocking: 是否阻塞，默认 True
@@ -639,18 +640,27 @@ class MySQLAdapter(BaseDBAdapter):
         def _event_processor():
             for binlog_event in stream:
                 try:
+                    event_meta = {
+                        "binlog_file": stream.log_file,
+                        "binlog_pos": stream.log_pos,
+                        "event_size": getattr(binlog_event, "event_size", 0),
+                        "timestamp": getattr(binlog_event, "timestamp", 0),
+                    }
+                    if hasattr(binlog_event, "packet") and hasattr(binlog_event.packet, "log_pos"):
+                        event_meta["binlog_pos"] = binlog_event.packet.log_pos
+
                     if isinstance(binlog_event, WriteRowsEvent):
                         event_type = "insert"
                         for row in binlog_event.rows:
-                            callback(event_type, binlog_event.table, row["values"])
+                            callback(event_type, binlog_event.table, row["values"], event_meta)
                     elif isinstance(binlog_event, UpdateRowsEvent):
                         event_type = "update"
                         for row in binlog_event.rows:
-                            callback(event_type, binlog_event.table, row["after_values"])
+                            callback(event_type, binlog_event.table, row["after_values"], event_meta)
                     elif isinstance(binlog_event, DeleteRowsEvent):
                         event_type = "delete"
                         for row in binlog_event.rows:
-                            callback(event_type, binlog_event.table, row["values"])
+                            callback(event_type, binlog_event.table, row["values"], event_meta)
                 except Exception as e:
                     logger.error("处理 binlog 事件出错: %s", e)
                     continue
@@ -1668,7 +1678,8 @@ class OracleAdapter(BaseDBAdapter):
 
         Args:
             tables: 需要监听的表名列表
-            callback: 变更事件回调函数，参数为 (event_type, table_name, data)
+            callback: 变更事件回调函数，参数为 (event_type, table_name, data, event_meta)
+                      event_meta: 包含 scn, timestamp 等元数据
             **kwargs: 额外参数
                       - start_scn: 起始 SCN，用于断点续传
                       - interval: 轮询间隔（秒），默认 2
@@ -1695,6 +1706,7 @@ class OracleAdapter(BaseDBAdapter):
                     return
 
                 logger.info("LogMiner 起始 SCN: %d", current_scn)
+                last_processed_scn = current_scn
 
                 while not stop_control["stop"]:
                     try:
@@ -1707,7 +1719,6 @@ class OracleAdapter(BaseDBAdapter):
 
                         try:
                             schema_tables = [f"{self.schema}.{t.upper()}" for t in tables]
-                            table_filter = "', '".join(schema_tables)
 
                             cur.execute(
                                 f"""
@@ -1752,12 +1763,19 @@ class OracleAdapter(BaseDBAdapter):
                                 if not event_type:
                                     continue
 
+                                event_meta = {
+                                    "scn": scn,
+                                    "timestamp": timestamp.isoformat() if timestamp else None,
+                                    "operation": operation,
+                                }
+
                                 data = self._parse_logmnr_row_data(conn, table_name, sql_redo, event_type)
                                 if data:
-                                    callback(event_type, table_name, data)
+                                    callback(event_type, table_name, data, event_meta)
+                                    last_processed_scn = scn
 
                             cur.execute("BEGIN DBMS_LOGMNR.END_LOGMNR(); END;")
-                            current_scn = end_scn
+                            current_scn = last_processed_scn
 
                         except Exception as e:
                             logger.warning("LogMiner 轮询出错: %s", e)
@@ -1776,7 +1794,7 @@ class OracleAdapter(BaseDBAdapter):
                 logger.error("LogMiner 线程异常: %s", e)
             finally:
                 self.close_connection(conn)
-                logger.info("Oracle LogMiner CDC 线程已停止")
+                logger.info("Oracle LogMiner CDC 线程已停止，最后处理 SCN: %d", last_processed_scn)
 
         t = threading.Thread(target=_logminer_worker, daemon=True)
         t.start()

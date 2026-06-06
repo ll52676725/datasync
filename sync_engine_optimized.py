@@ -211,15 +211,19 @@ def sync_table_optimized(
                     row_tuple = tuple(row[c] for c in columns)
 
                     if enable_transaction_splitter and tx_splitter:
-                        need_commit = tx_splitter.add_row(row_tuple)
+                        need_commit = tx_splitter.add_row(
+                            row_tuple,
+                            safe_point=row_tuple[columns.index(pk_col)] if pk_col in columns else None,
+                        )
                         if need_commit:
-                            batch_to_insert = tx_splitter.get_batch_and_reset()
+                            batch_to_insert, boundary = tx_splitter.get_batch_and_reset()
                             _do_insert_with_retry(
                                 tgt_adapter, tgt_conn, table_name, columns,
                                 batch_to_insert, retry_mgr,
                             )
+                            tx_splitter.mark_batch_committed(boundary.batch_id)
                             synced_rows += len(batch_to_insert)
-                            update_progress(tgt_cfg, table_name, synced_rows, chunk_end)
+                            update_progress(tgt_cfg, table_name, synced_rows, boundary.end_safe_point or chunk_end)
                     else:
                         insert_batch.append(row_tuple)
                         if len(insert_batch) >= batch_insert_size:
@@ -242,11 +246,12 @@ def sync_table_optimized(
                 fetch_start = time.time()
 
             if enable_transaction_splitter and tx_splitter and tx_splitter.has_pending():
-                batch_to_insert = tx_splitter.get_batch_and_reset()
+                batch_to_insert, boundary = tx_splitter.get_batch_and_reset()
                 _do_insert_with_retry(
                     tgt_adapter, tgt_conn, table_name, columns,
                     batch_to_insert, retry_mgr,
                 )
+                tx_splitter.mark_batch_committed(boundary.batch_id)
                 synced_rows += len(batch_to_insert)
 
             update_progress(tgt_cfg, table_name, synced_rows, chunk_end)
@@ -373,19 +378,21 @@ def _sync_table_streaming_optimized(
                 row_tuple = tuple(row[c] for c in columns)
                 need_commit = tx_splitter.add_row(row_tuple)
                 if need_commit:
-                    batch_to_insert = tx_splitter.get_batch_and_reset()
+                    batch_to_insert, boundary = tx_splitter.get_batch_and_reset()
                     _do_insert_with_retry(
                         tgt_adapter, tgt_conn, table_name, columns,
                         batch_to_insert, retry_mgr,
                     )
+                    tx_splitter.mark_batch_committed(boundary.batch_id)
                     synced_rows += len(batch_to_insert)
 
             if tx_splitter.has_pending():
-                batch_to_insert = tx_splitter.get_batch_and_reset()
+                batch_to_insert, boundary = tx_splitter.get_batch_and_reset()
                 _do_insert_with_retry(
                     tgt_adapter, tgt_conn, table_name, columns,
                     batch_to_insert, retry_mgr,
                 )
+                tx_splitter.mark_batch_committed(boundary.batch_id)
                 synced_rows += len(batch_to_insert)
 
             now = time.time()
