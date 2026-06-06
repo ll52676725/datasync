@@ -270,12 +270,13 @@ class RealtimeSyncEngine:
 
     def _sync_table_events(self, conn, table_name: str, events: List[CDCEvent]) -> Optional[CDCEvent]:
         """
-        同步单张表的 CDC 事件（事务安全版）。
+        同步单张表的 CDC 事件（批量优化版）。
 
         策略：
-        - INSERT/UPDATE: 使用 upsert（幂等）
-        - DELETE: 使用 delete
-        - 每行成功后立即 commit 并更新位置，确保崩溃后精确恢复
+        - INSERT/UPDATE: 使用 batch_upsert 批量处理（事务内批量提交）
+        - DELETE: 使用 batch_delete 批量处理（WHERE IN 一次删除）
+        - 按操作类型分组批量处理，大幅提升性能
+        - 批量成功后更新位置为最后一个事件的位置，确保断点续传
 
         Returns:
             最后一个成功处理的事件（用于位置更新），全部失败返回 None
@@ -285,24 +286,59 @@ class RealtimeSyncEngine:
             logger.warning("表 %s 无主键，跳过同步", table_name)
             return None
 
-        last_success = None
+        insert_update_events = []
+        delete_events = []
         for event in events:
-            try:
-                if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
-                    self.tgt_adapter.upsert_row(conn, table_name, event.data, pk_col, auto_commit=True)
-                elif event.event_type == CDCAction.DELETE:
+            if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
+                insert_update_events.append(event)
+            elif event.event_type == CDCAction.DELETE:
+                delete_events.append(event)
+
+        last_success = None
+
+        try:
+            if insert_update_events:
+                columns = list(insert_update_events[0].data.keys())
+                rows = []
+                for event in insert_update_events:
+                    row = tuple(event.data.get(col) for col in columns)
+                    rows.append(row)
+
+                self.tgt_adapter.batch_upsert(
+                    conn, table_name, columns, rows, pk_col, auto_commit=False
+                )
+                last_success = insert_update_events[-1]
+
+            if delete_events:
+                pk_values = []
+                valid_delete_events = []
+                for event in delete_events:
                     pk_value = event.data.get(pk_col)
                     if pk_value is not None:
-                        self.tgt_adapter.delete_row(conn, table_name, pk_col, pk_value, auto_commit=True)
-                last_success = event
-                self._update_position_from_event(event)
-            except Exception as e:
-                logger.error(
-                    "同步事件失败: table=%s, type=%s, pk=%s, error=%s",
-                    table_name, event.event_type,
-                    event.data.get(pk_col), e,
-                )
-                raise
+                        pk_values.append(pk_value)
+                        valid_delete_events.append(event)
+
+                if pk_values:
+                    self.tgt_adapter.batch_delete(
+                        conn, table_name, pk_col, pk_values, auto_commit=False
+                    )
+                    last_success = valid_delete_events[-1]
+
+            conn.commit()
+
+            if last_success is not None:
+                self._update_position_from_event(last_success)
+
+        except Exception as e:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            logger.error(
+                "批量同步表事件失败: table=%s, insert/update=%d, delete=%d, error=%s",
+                table_name, len(insert_update_events), len(delete_events), e,
+            )
+            raise
 
         return last_success
 

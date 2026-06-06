@@ -388,6 +388,35 @@ class BaseDBAdapter(ABC):
         """
         raise NotImplementedError(f"delete_row 未在 {self.__class__.__name__} 中实现")
 
+    def batch_upsert(self, conn, table_name: str, columns: List[str],
+                     rows: List[tuple], primary_key: str, auto_commit: bool = True):
+        """
+        批量插入或更新数据（MERGE/UPSERT）。
+
+        Args:
+            conn: 数据库连接
+            table_name: 表名
+            columns: 列名列表
+            rows: 数据行列表（元组），按 columns 顺序排列
+            primary_key: 主键列名
+            auto_commit: 是否自动提交事务
+        """
+        raise NotImplementedError(f"batch_upsert 未在 {self.__class__.__name__} 中实现")
+
+    def batch_delete(self, conn, table_name: str, primary_key: str,
+                     pk_values: List[Any], auto_commit: bool = True):
+        """
+        批量删除数据（按主键列表删除）。
+
+        Args:
+            conn: 数据库连接
+            table_name: 表名
+            primary_key: 主键列名
+            pk_values: 主键值列表
+            auto_commit: 是否自动提交事务
+        """
+        raise NotImplementedError(f"batch_delete 未在 {self.__class__.__name__} 中实现")
+
 
 # ====================================================================== #
 #                        MySQL 适配器实现
@@ -812,6 +841,39 @@ class MySQLAdapter(BaseDBAdapter):
 
         cur = conn.cursor()
         cur.execute(sql, (pk_value,))
+        if auto_commit:
+            conn.commit()
+        cur.close()
+
+    def batch_upsert(self, conn, table_name: str, columns: List[str],
+                     rows: List[tuple], primary_key: str, auto_commit: bool = True):
+        """MySQL 批量插入或更新数据（使用 ON DUPLICATE KEY UPDATE）。"""
+        if not rows:
+            return
+        qt = self.quote_identifier(table_name)
+        col_list = ", ".join(self.quote_identifier(c) for c in columns)
+        placeholders = ", ".join(["%s"] * len(columns))
+        update_list = ", ".join(f"{self.quote_identifier(c)} = VALUES({self.quote_identifier(c)})" for c in columns)
+        sql = f"INSERT INTO {qt} ({col_list}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {update_list}"
+
+        cur = conn.cursor()
+        cur.executemany(sql, rows)
+        if auto_commit:
+            conn.commit()
+        cur.close()
+
+    def batch_delete(self, conn, table_name: str, primary_key: str,
+                     pk_values: List[Any], auto_commit: bool = True):
+        """MySQL 批量删除数据（使用 WHERE IN）。"""
+        if not pk_values:
+            return
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        placeholders = ", ".join(["%s"] * len(pk_values))
+        sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
+
+        cur = conn.cursor()
+        cur.execute(sql, pk_values)
         if auto_commit:
             conn.commit()
         cur.close()
@@ -1336,6 +1398,62 @@ class DB2Adapter(BaseDBAdapter):
             conn.commit()
         cur.close()
 
+    def batch_upsert(self, conn, table_name: str, columns: List[str],
+                     rows: List[tuple], primary_key: str, auto_commit: bool = True):
+        """DB2 批量插入或更新数据（使用 MERGE 语句逐行处理，事务批量提交）。
+
+        注意：DB2 的 MERGE 不支持直接批量多行数据，因此采用 executemany + 单次事务提交的方式。
+        相比逐行 commit，性能提升显著。
+        """
+        if not rows:
+            return
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        pk_idx = columns.index(primary_key)
+
+        col_list = ", ".join(self.quote_identifier(c) for c in columns)
+        placeholders = ", ".join(["?"] * len(columns))
+        update_list = ", ".join(
+            f"{self.quote_identifier(c)} = ?" for c in columns if c != primary_key
+        )
+
+        sql = f"""
+            MERGE INTO {qt} AS t
+            USING (VALUES (?)) AS s({qpk})
+            ON t.{qpk} = s.{qpk}
+            WHEN MATCHED THEN
+                UPDATE SET {update_list}
+            WHEN NOT MATCHED THEN
+                INSERT ({col_list}) VALUES ({placeholders})
+        """
+
+        cur = conn.cursor()
+        try:
+            for row in rows:
+                pk_value = row[pk_idx]
+                update_values = [v for i, v in enumerate(row) if columns[i] != primary_key]
+                cur.execute(sql, [pk_value] + update_values + list(row))
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
+
+    def batch_delete(self, conn, table_name: str, primary_key: str,
+                     pk_values: List[Any], auto_commit: bool = True):
+        """DB2 批量删除数据（使用 WHERE IN）。"""
+        if not pk_values:
+            return
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        placeholders = ", ".join(["?"] * len(pk_values))
+        sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
+
+        cur = conn.cursor()
+        cur.execute(sql, pk_values)
+        if auto_commit:
+            conn.commit()
+        cur.close()
+
 
 # ====================================================================== #
 #                        Oracle 适配器实现
@@ -1805,6 +1923,64 @@ class OracleAdapter(BaseDBAdapter):
 
         cur = conn.cursor()
         cur.execute(sql, (pk_value,))
+        if auto_commit:
+            conn.commit()
+        cur.close()
+
+    def batch_upsert(self, conn, table_name: str, columns: List[str],
+                     rows: List[tuple], primary_key: str, auto_commit: bool = True):
+        """Oracle 批量插入或更新数据（使用 MERGE 语句逐行处理，事务批量提交）。
+
+        注意：Oracle 的 MERGE 不支持直接批量多行数据，因此采用循环执行 + 单次事务提交的方式。
+        相比逐行 commit，性能提升显著。
+        """
+        if not rows:
+            return
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        pk_idx = columns.index(primary_key)
+
+        col_list = ", ".join(self.quote_identifier(c) for c in columns)
+        placeholders = ", ".join([f":{i+1}" for i in range(len(columns))])
+        update_list = ", ".join(
+            f"{self.quote_identifier(c)} = :{i+len(columns)+1}"
+            for i, c in enumerate(columns)
+            if c != primary_key
+        )
+
+        sql = f"""
+            MERGE INTO {qt} t
+            USING (SELECT :1 AS {qpk} FROM DUAL) s
+            ON (t.{qpk} = s.{qpk})
+            WHEN MATCHED THEN
+                UPDATE SET {update_list}
+            WHEN NOT MATCHED THEN
+                INSERT ({col_list}) VALUES ({placeholders})
+        """
+
+        cur = conn.cursor()
+        try:
+            for row in rows:
+                pk_value = row[pk_idx]
+                update_values = [v for i, v in enumerate(row) if columns[i] != primary_key]
+                cur.execute(sql, [pk_value] + update_values + list(row))
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
+
+    def batch_delete(self, conn, table_name: str, primary_key: str,
+                     pk_values: List[Any], auto_commit: bool = True):
+        """Oracle 批量删除数据（使用 WHERE IN）。"""
+        if not pk_values:
+            return
+        qt = self.quote_identifier(table_name)
+        qpk = self.quote_identifier(primary_key)
+        placeholders = ", ".join([f":{i+1}" for i in range(len(pk_values))])
+        sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
+
+        cur = conn.cursor()
+        cur.execute(sql, pk_values)
         if auto_commit:
             conn.commit()
         cur.close()
