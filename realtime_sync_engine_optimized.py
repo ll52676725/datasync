@@ -273,9 +273,11 @@ class RealtimeSyncEngineOptimized:
             self.stats["last_sync_time"] = time.time()
 
             last_event = events[-1]
-            if hasattr(last_event, 'binlog_file') and last_event.binlog_file:
-                self.stats["current_binlog_file"] = last_event.binlog_file
-                self.stats["current_binlog_pos"] = last_event.binlog_pos
+            if hasattr(last_event, 'binlog_file'):
+                if last_event.binlog_file:
+                    self.stats["current_binlog_file"] = last_event.binlog_file
+                if last_event.binlog_pos > 0:
+                    self.stats["current_binlog_pos"] = last_event.binlog_pos
             if hasattr(last_event, 'scn') and last_event.scn is not None:
                 self.stats["current_scn"] = last_event.scn
 
