@@ -404,9 +404,10 @@ class BaseDBAdapter(ABC):
         raise NotImplementedError(f"batch_upsert 未在 {self.__class__.__name__} 中实现")
 
     def batch_delete(self, conn, table_name: str, primary_key: str,
-                     pk_values: List[Any], auto_commit: bool = True):
+                     pk_values: List[Any], auto_commit: bool = True,
+                     chunk_size: int = 500):
         """
-        批量删除数据（按主键列表删除）。
+        批量删除数据（按主键列表删除，自动分批避免 IN 列表过大）。
 
         Args:
             conn: 数据库连接
@@ -414,8 +415,24 @@ class BaseDBAdapter(ABC):
             primary_key: 主键列名
             pk_values: 主键值列表
             auto_commit: 是否自动提交事务
+            chunk_size: 每批删除的最大数量，避免 IN 列表过大报错
         """
-        raise NotImplementedError(f"batch_delete 未在 {self.__class__.__name__} 中实现")
+        if not pk_values:
+            return
+        for i in range(0, len(pk_values), chunk_size):
+            chunk = pk_values[i:i + chunk_size]
+            self._batch_delete_chunk(conn, table_name, primary_key, chunk, auto_commit=False)
+        if auto_commit:
+            conn.commit()
+
+    def _batch_delete_chunk(self, conn, table_name: str, primary_key: str,
+                            pk_values: List[Any], auto_commit: bool = True):
+        """
+        单批删除数据（内部方法，由 batch_delete 调用）。
+
+        各数据库适配器应实现此方法执行单批 DELETE。
+        """
+        raise NotImplementedError(f"_batch_delete_chunk 未在 {self.__class__.__name__} 中实现")
 
 
 # ====================================================================== #
@@ -687,6 +704,13 @@ class MySQLAdapter(BaseDBAdapter):
     def quote_identifier(self, name: str) -> str:
         return f"`{name}`"
 
+    def _validate_identifier(self, name: str) -> str:
+        """验证 SQL 标识符合法性，防止 SQL 注入。"""
+        import re
+        if not re.match(r'^[A-Za-z0-9_]+$', name):
+            raise ValueError(f"Invalid SQL identifier: {name}")
+        return name
+
     # ------------------------------------------------------------------ #
     #                        CDC (Change Data Capture)
     # ------------------------------------------------------------------ #
@@ -824,10 +848,12 @@ class MySQLAdapter(BaseDBAdapter):
         """
 
         cur = conn.cursor()
-        cur.execute(sql, values + values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, values + values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
         """MySQL 删除一行数据。
@@ -840,10 +866,12 @@ class MySQLAdapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} = %s"
 
         cur = conn.cursor()
-        cur.execute(sql, (pk_value,))
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, (pk_value,))
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def batch_upsert(self, conn, table_name: str, columns: List[str],
                      rows: List[tuple], primary_key: str, auto_commit: bool = True):
@@ -857,14 +885,16 @@ class MySQLAdapter(BaseDBAdapter):
         sql = f"INSERT INTO {qt} ({col_list}) VALUES ({placeholders}) ON DUPLICATE KEY UPDATE {update_list}"
 
         cur = conn.cursor()
-        cur.executemany(sql, rows)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.executemany(sql, rows)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
-    def batch_delete(self, conn, table_name: str, primary_key: str,
-                     pk_values: List[Any], auto_commit: bool = True):
-        """MySQL 批量删除数据（使用 WHERE IN）。"""
+    def _batch_delete_chunk(self, conn, table_name: str, primary_key: str,
+                            pk_values: List[Any], auto_commit: bool = True):
+        """MySQL 单批删除数据（使用 WHERE IN）。"""
         if not pk_values:
             return
         qt = self.quote_identifier(table_name)
@@ -873,10 +903,12 @@ class MySQLAdapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
 
         cur = conn.cursor()
-        cur.execute(sql, pk_values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, pk_values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def check_cdc_environment(self, conn) -> Dict[str, Any]:
         """
@@ -1377,10 +1409,12 @@ class DB2Adapter(BaseDBAdapter):
         """
 
         cur = conn.cursor()
-        cur.execute(sql, [pk_value] + update_values + values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, [pk_value] + update_values + values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
         """DB2 删除一行数据。
@@ -1393,10 +1427,26 @@ class DB2Adapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} = ?"
 
         cur = conn.cursor()
-        cur.execute(sql, (pk_value,))
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, (pk_value,))
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
+
+    def _validate_identifier(self, name: str) -> str:
+        """验证 SQL 标识符合法性，防止 SQL 注入。"""
+        import re
+        if not re.match(r'^[A-Za-z0-9_]+$', name):
+            raise ValueError(f"Invalid SQL identifier: {name}")
+        return name
+
+    def _get_temp_table_col_defs(self, columns: List[str]) -> str:
+        """生成临时表列定义，使用 CLOB 避免数据截断。"""
+        col_defs = []
+        for c in columns:
+            col_defs.append(f"{self.quote_identifier(c)} CLOB")
+        return ", ".join(col_defs)
 
     def batch_upsert(self, conn, table_name: str, columns: List[str],
                      rows: List[tuple], primary_key: str, auto_commit: bool = True):
@@ -1412,9 +1462,12 @@ class DB2Adapter(BaseDBAdapter):
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         pk_idx = columns.index(primary_key)
-        temp_table = f"SESSION.TEMP_BATCH_UPSERT_{abs(hash(table_name)) % 1000000}"
+        temp_table_suffix = abs(hash(table_name)) % 1000000
+        temp_table = f"SESSION.TEMP_BATCH_UPSERT_{temp_table_suffix}"
 
-        col_defs = ", ".join(f"{self.quote_identifier(c)} VARCHAR(32672)" for c in columns)
+        for col in columns:
+            self._validate_identifier(col)
+
         col_list = ", ".join(self.quote_identifier(c) for c in columns)
         placeholders = ", ".join(["?"] * len(columns))
         update_list = ", ".join(
@@ -1424,6 +1477,7 @@ class DB2Adapter(BaseDBAdapter):
 
         cur = conn.cursor()
         try:
+            col_defs = self._get_temp_table_col_defs(columns)
             cur.execute(f"DECLARE GLOBAL TEMPORARY TABLE {temp_table} ({col_defs}) ON COMMIT DELETE ROWS NOT LOGGED")
             cur.executemany(f"INSERT INTO {temp_table} ({col_list}) VALUES ({placeholders})", rows)
             merge_sql = f"""
@@ -1445,9 +1499,9 @@ class DB2Adapter(BaseDBAdapter):
                 pass
             cur.close()
 
-    def batch_delete(self, conn, table_name: str, primary_key: str,
-                     pk_values: List[Any], auto_commit: bool = True):
-        """DB2 批量删除数据（使用 WHERE IN）。"""
+    def _batch_delete_chunk(self, conn, table_name: str, primary_key: str,
+                            pk_values: List[Any], auto_commit: bool = True):
+        """DB2 单批删除数据（使用 WHERE IN）。"""
         if not pk_values:
             return
         qt = self.quote_identifier(table_name)
@@ -1456,10 +1510,12 @@ class DB2Adapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
 
         cur = conn.cursor()
-        cur.execute(sql, pk_values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, pk_values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
 
 # ====================================================================== #
@@ -1913,10 +1969,12 @@ class OracleAdapter(BaseDBAdapter):
         """
 
         cur = conn.cursor()
-        cur.execute(sql, [pk_value] + update_values + values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, [pk_value] + update_values + values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def delete_row(self, conn, table_name: str, primary_key: str, pk_value: Any, auto_commit: bool = True):
         """Oracle 删除一行数据。
@@ -1929,17 +1987,26 @@ class OracleAdapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} = :1"
 
         cur = conn.cursor()
-        cur.execute(sql, (pk_value,))
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, (pk_value,))
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
+
+    def _validate_identifier(self, name: str) -> str:
+        """验证 SQL 标识符合法性，防止 SQL 注入。"""
+        import re
+        if not re.match(r'^[A-Za-z0-9_]+$', name):
+            raise ValueError(f"Invalid SQL identifier: {name}")
+        return name
 
     def batch_upsert(self, conn, table_name: str, columns: List[str],
                      rows: List[tuple], primary_key: str, auto_commit: bool = True):
         """Oracle 批量插入或更新数据（使用临时表 + 单次 MERGE）。
 
         实现方式：
-        1. 创建临时表
+        1. 创建临时表（使用绑定变量避免 SQL 注入）
         2. 批量插入所有数据到临时表（使用 executemany）
         3. 用临时表与目标表做一次 MERGE
         相比逐行执行 MERGE，性能提升 5-10 倍
@@ -1949,9 +2016,13 @@ class OracleAdapter(BaseDBAdapter):
         qt = self.quote_identifier(table_name)
         qpk = self.quote_identifier(primary_key)
         pk_idx = columns.index(primary_key)
-        temp_table = f'GTT_BATCH_UPSERT_{abs(hash(table_name)) % 1000000}'
+        temp_table_suffix = abs(hash(table_name)) % 1000000
+        temp_table = f'GTT_BATCH_UPSERT_{temp_table_suffix}'
+        temp_table_quoted = self.quote_identifier(temp_table)
 
-        col_defs = ", ".join(f"{self.quote_identifier(c)} VARCHAR2(4000)" for c in columns)
+        for col in columns:
+            self._validate_identifier(col)
+
         col_list = ", ".join(self.quote_identifier(c) for c in columns)
         placeholders = ", ".join([f":{i+1}" for i in range(len(columns))])
         update_list = ", ".join(
@@ -1961,20 +2032,23 @@ class OracleAdapter(BaseDBAdapter):
 
         cur = conn.cursor()
         try:
-            cur.execute(f"""
+            cur.execute("""
                 DECLARE
                     v_count NUMBER;
+                    v_table_name VARCHAR2(100) := :1;
+                    v_col_defs VARCHAR2(4000) := :2;
                 BEGIN
-                    SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = '{temp_table}';
+                    SELECT COUNT(*) INTO v_count FROM user_tables WHERE table_name = UPPER(v_table_name);
                     IF v_count = 0 THEN
-                        EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE {temp_table} ({col_defs}) ON COMMIT DELETE ROWS';
+                        EXECUTE IMMEDIATE 'CREATE GLOBAL TEMPORARY TABLE ' || v_table_name || 
+                            ' (' || v_col_defs || ') ON COMMIT DELETE ROWS';
                     END IF;
                 END;
-            """)
-            cur.executemany(f"INSERT INTO {temp_table} ({col_list}) VALUES ({placeholders})", rows)
+            """, (temp_table, self._get_temp_table_col_defs(columns)))
+            cur.executemany(f"INSERT INTO {temp_table_quoted} ({col_list}) VALUES ({placeholders})", rows)
             merge_sql = f"""
                 MERGE INTO {qt} t
-                USING {temp_table} s
+                USING {temp_table_quoted} s
                 ON (t.{qpk} = s.{qpk})
                 WHEN MATCHED THEN
                     UPDATE SET {update_list}
@@ -1986,14 +2060,21 @@ class OracleAdapter(BaseDBAdapter):
                 conn.commit()
         finally:
             try:
-                cur.execute(f"TRUNCATE TABLE {temp_table}")
+                cur.execute(f"TRUNCATE TABLE {temp_table_quoted}")
             except Exception:
                 pass
             cur.close()
 
-    def batch_delete(self, conn, table_name: str, primary_key: str,
-                     pk_values: List[Any], auto_commit: bool = True):
-        """Oracle 批量删除数据（使用 WHERE IN）。"""
+    def _get_temp_table_col_defs(self, columns: List[str]) -> str:
+        """生成临时表列定义，使用 CLOB 避免数据截断。"""
+        col_defs = []
+        for c in columns:
+            col_defs.append(f"{self.quote_identifier(c)} CLOB")
+        return ", ".join(col_defs)
+
+    def _batch_delete_chunk(self, conn, table_name: str, primary_key: str,
+                            pk_values: List[Any], auto_commit: bool = True):
+        """Oracle 单批删除数据（使用 WHERE IN）。"""
         if not pk_values:
             return
         qt = self.quote_identifier(table_name)
@@ -2002,10 +2083,12 @@ class OracleAdapter(BaseDBAdapter):
         sql = f"DELETE FROM {qt} WHERE {qpk} IN ({placeholders})"
 
         cur = conn.cursor()
-        cur.execute(sql, pk_values)
-        if auto_commit:
-            conn.commit()
-        cur.close()
+        try:
+            cur.execute(sql, pk_values)
+            if auto_commit:
+                conn.commit()
+        finally:
+            cur.close()
 
     def get_current_scn(self, conn) -> Optional[int]:
         """获取当前系统 SCN (System Change Number)。"""
