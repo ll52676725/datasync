@@ -13,6 +13,8 @@ import logging
 from abc import ABC, abstractmethod
 from typing import List, Optional, Tuple, Any, Dict
 
+from ddl_adapter import TableSchema, ColumnSchema, DataTypeMapper, convert_ddl
+
 logger = logging.getLogger(__name__)
 
 
@@ -145,6 +147,20 @@ class BaseDBAdapter(ABC):
 
         Returns:
             DDL 语句字符串
+        """
+        ...
+
+    @abstractmethod
+    def get_table_schema(self, conn, table_name: str) -> TableSchema:
+        """
+        获取表的完整元数据（中间表示），用于跨库 DDL 转换。
+
+        Args:
+            conn: 已建立的数据库连接
+            table_name: 表名
+
+        Returns:
+            TableSchema 对象，包含表的完整元数据
         """
         ...
 
@@ -487,6 +503,74 @@ class MySQLAdapter(BaseDBAdapter):
             ddl = cur.fetchone()[1]
         logger.debug("MySQL 获取表 %s 的 DDL (长度=%d)", table_name, len(ddl))
         return ddl
+
+    def get_table_schema(self, conn, table_name: str) -> TableSchema:
+        """从 MySQL 读取表元数据到中间表示。"""
+        schema = TableSchema(
+            table_name=table_name,
+            source_db_type="mysql"
+        )
+        
+        with conn.cursor() as cur:
+            cur.execute(
+                """
+                SELECT COLUMN_NAME, DATA_TYPE, CHARACTER_MAXIMUM_LENGTH,
+                       NUMERIC_PRECISION, NUMERIC_SCALE, IS_NULLABLE,
+                       COLUMN_DEFAULT, EXTRA, COLUMN_TYPE, COLUMN_COMMENT
+                FROM information_schema.COLUMNS
+                WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                ORDER BY ORDINAL_POSITION
+                """,
+                (self.cfg["database"], table_name),
+            )
+            rows = cur.fetchall()
+            
+            for row in rows:
+                col_name, data_type, char_len, num_prec, num_scale, \
+                is_nullable, col_default, extra, column_type, col_comment = row
+                
+                original_type = column_type.upper() if column_type else data_type.upper()
+                
+                std_type, params = DataTypeMapper.to_standard(
+                    "mysql",
+                    original_type if "UNSIGNED" in original_type else data_type,
+                    length=char_len,
+                    precision=num_prec,
+                    scale=num_scale
+                )
+                
+                is_pk = False
+                cur.execute(
+                    """
+                    SELECT COLUMN_NAME FROM information_schema.KEY_COLUMN_USAGE
+                    WHERE TABLE_SCHEMA = %s AND TABLE_NAME = %s
+                      AND CONSTRAINT_NAME = 'PRIMARY' AND COLUMN_NAME = %s
+                    """,
+                    (self.cfg["database"], table_name, col_name),
+                )
+                if cur.fetchone():
+                    is_pk = True
+                    if col_name not in schema.primary_keys:
+                        schema.primary_keys.append(col_name)
+                
+                column = ColumnSchema(
+                    name=col_name,
+                    data_type=std_type,
+                    length=params.get("length", char_len),
+                    precision=params.get("precision", num_prec),
+                    scale=params.get("scale", num_scale),
+                    nullable=(is_nullable == "YES"),
+                    default_value=str(col_default) if col_default is not None else None,
+                    is_primary_key=is_pk,
+                    comment=col_comment,
+                    auto_increment=("auto_increment" in extra.lower()) if extra else False,
+                    original_db_type=original_type
+                )
+                schema.columns.append(column)
+        
+        logger.debug("MySQL 读取表 %s 元数据: %d 列, 主键: %s",
+                     table_name, len(schema.columns), schema.primary_keys)
+        return schema
 
     def fetch_chunk(self, conn, table_name: str, columns: List[str],
                     pk_col: str, start_pk: int, end_pk: int,
@@ -1024,6 +1108,82 @@ class DB2Adapter(BaseDBAdapter):
         logger.debug("DB2 重建表 %s 的 DDL (长度=%d)", table_name, len(ddl))
         return ddl
 
+    def get_table_schema(self, conn, table_name: str) -> TableSchema:
+        """从 DB2 读取表元数据到中间表示。"""
+        schema = TableSchema(
+            table_name=table_name,
+            source_db_type="db2"
+        )
+        table_upper = table_name.upper()
+        
+        cur = conn.cursor()
+        
+        cur.execute(
+            """
+            SELECT COLNAME, TYPENAME, LENGTH, SCALE, NULLS, DEFAULT,
+                   REMARKS, COLNO
+            FROM SYSCAT.COLUMNS
+            WHERE TABSCHEMA = ? AND TABNAME = ?
+            ORDER BY COLNO
+            """,
+            (self.schema, table_upper),
+        )
+        columns_info = cur.fetchall()
+        
+        cur.execute(
+            """
+            SELECT COLNAMES FROM SYSCAT.INDEXES
+            WHERE TABSCHEMA = ? AND TABNAME = ? AND UNIQUERULE = 'P'
+            FETCH FIRST 1 ROWS ONLY
+            """,
+            (self.schema, table_upper),
+        )
+        pk_row = cur.fetchone()
+        pk_cols = []
+        if pk_row:
+            pk_str = pk_row[0].strip()
+            if pk_str.startswith('"') and pk_str.endswith('"'):
+                pk_cols = [pk_str.strip('"')]
+            else:
+                pk_cols = [c.strip() for c in pk_str.split("+")]
+        
+        for col_info in columns_info:
+            col_name, type_name, length, scale, nulls, default_val, remarks, colno = col_info
+            
+            original_type = type_name.strip().upper()
+            
+            std_type, params = DataTypeMapper.to_standard(
+                "db2",
+                original_type,
+                length=length,
+                precision=length if original_type in ("DECIMAL", "NUMERIC") else None,
+                scale=scale
+            )
+            
+            is_pk = col_name.strip().upper() in [p.upper() for p in pk_cols]
+            
+            column = ColumnSchema(
+                name=col_name.strip(),
+                data_type=std_type,
+                length=params.get("length", length),
+                precision=params.get("precision", length if original_type in ("DECIMAL", "NUMERIC") else None),
+                scale=params.get("scale", scale),
+                nullable=(nulls == "Y"),
+                default_value=default_val.strip() if default_val and default_val.strip() else None,
+                is_primary_key=is_pk,
+                comment=remarks.strip() if remarks and remarks.strip() else None,
+                auto_increment=False,
+                original_db_type=original_type
+            )
+            schema.columns.append(column)
+        
+        schema.primary_keys = [c.strip() for c in pk_cols]
+        cur.close()
+        
+        logger.debug("DB2 读取表 %s 元数据: %d 列, 主键: %s",
+                     table_name, len(schema.columns), schema.primary_keys)
+        return schema
+
     def fetch_chunk(self, conn, table_name: str, columns: List[str],
                     pk_col: str, start_pk: int, end_pk: int,
                     batch_size: int):
@@ -1392,6 +1552,80 @@ class OracleAdapter(BaseDBAdapter):
               ",\n  ".join(col_defs) + "\n)"
         logger.debug("Oracle 重建表 %s 的 DDL (长度=%d)", table_name, len(ddl))
         return ddl
+
+    def get_table_schema(self, conn, table_name: str) -> TableSchema:
+        """从 Oracle 读取表元数据到中间表示。"""
+        schema = TableSchema(
+            table_name=table_name,
+            source_db_type="oracle"
+        )
+        table_upper = table_name.upper()
+        
+        cur = conn.cursor()
+        
+        cur.execute(
+            """
+            SELECT COLUMN_NAME, DATA_TYPE, DATA_LENGTH, DATA_PRECISION,
+                   DATA_SCALE, NULLABLE, DATA_DEFAULT, COLUMN_ID
+            FROM ALL_TAB_COLUMNS
+            WHERE OWNER = :1 AND TABLE_NAME = :2
+            ORDER BY COLUMN_ID
+            """,
+            (self.schema, table_upper),
+        )
+        columns_info = cur.fetchall()
+        
+        cur.execute(
+            """
+            SELECT acc.COLUMN_NAME
+            FROM ALL_CONSTRAINTS ac
+            JOIN ALL_CONS_COLUMNS acc
+              ON ac.OWNER = acc.OWNER AND ac.CONSTRAINT_NAME = acc.CONSTRAINT_NAME
+            WHERE ac.OWNER = :1 AND ac.TABLE_NAME = :2 AND ac.CONSTRAINT_TYPE = 'P'
+            ORDER BY acc.POSITION
+            """,
+            (self.schema, table_upper),
+        )
+        pk_rows = cur.fetchall()
+        pk_cols = [row[0] for row in pk_rows]
+        
+        for col_info in columns_info:
+            col_name, data_type, data_length, data_precision, \
+            data_scale, nullable, data_default, column_id = col_info
+            
+            original_type = data_type.strip().upper()
+            
+            std_type, params = DataTypeMapper.to_standard(
+                "oracle",
+                original_type,
+                length=data_length,
+                precision=data_precision,
+                scale=data_scale
+            )
+            
+            is_pk = col_name.strip().upper() in [p.upper() for p in pk_cols]
+            
+            column = ColumnSchema(
+                name=col_name.strip(),
+                data_type=std_type,
+                length=params.get("length", data_length),
+                precision=params.get("precision", data_precision),
+                scale=params.get("scale", data_scale),
+                nullable=(nullable == "Y"),
+                default_value=str(data_default).strip() if data_default and str(data_default).strip() else None,
+                is_primary_key=is_pk,
+                comment=None,
+                auto_increment=False,
+                original_db_type=original_type
+            )
+            schema.columns.append(column)
+        
+        schema.primary_keys = pk_cols
+        cur.close()
+        
+        logger.debug("Oracle 读取表 %s 元数据: %d 列, 主键: %s",
+                     table_name, len(schema.columns), schema.primary_keys)
+        return schema
 
     def fetch_chunk(self, conn, table_name: str, columns: List[str],
                     pk_col: str, start_pk: int, end_pk: int,

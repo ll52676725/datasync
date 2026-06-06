@@ -22,6 +22,7 @@ import logging
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_adapter import get_adapter, BaseDBAdapter
+from ddl_adapter import convert_ddl
 
 logger = logging.getLogger(__name__)
 
@@ -388,11 +389,13 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False):
     """
     确保目标数据库中存在与源表结构一致的表。
 
-    如果目标表不存在，则从源库获取 DDL 并在目标库创建。
+    如果目标表不存在，则从源库获取表结构元数据，转换为目标数据库兼容的 DDL 并创建。
     如果目标表已存在且非断点续传模式，则清空目标表数据。
 
-    注意：跨数据库类型（如 mysql→db2）时，DDL 可能需要适配。
-    目前直接执行源库的 DDL，如有不兼容需要用户手动调整。
+    支持跨数据库类型的 DDL 适配：
+      - MySQL ↔ DB2
+      - MySQL ↔ Oracle
+      - DB2 ↔ Oracle
 
     Args:
         src_cfg: 源数据库配置
@@ -405,11 +408,19 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False):
     src_conn = src_adapter.create_connection()
     tgt_conn = tgt_adapter.create_connection()
     try:
-        ddl = src_adapter.get_create_table_ddl(src_conn, table_name)
-        logger.info("获取源表 %s 的 DDL (类型: %s→%s)",
-                     table_name, src_adapter.db_type, tgt_adapter.db_type)
-
         if not tgt_adapter.table_exists(tgt_conn, table_name):
+            if src_adapter.db_type == tgt_adapter.db_type:
+                ddl = src_adapter.get_create_table_ddl(src_conn, table_name)
+                logger.info("同数据库类型同步，直接使用源 DDL: %s→%s",
+                            src_adapter.db_type, tgt_adapter.db_type)
+            else:
+                logger.info("跨数据库类型同步，进行 DDL 转换: %s→%s",
+                            src_adapter.db_type, tgt_adapter.db_type)
+                src_schema = src_adapter.get_table_schema(src_conn, table_name)
+                ddl = convert_ddl(src_schema, tgt_adapter.db_type)
+                logger.info("DDL 转换完成，目标 DDL 长度: %d", len(ddl))
+                logger.debug("转换后的 DDL:\n%s", ddl)
+            
             tgt_adapter.create_table_from_ddl(tgt_conn, ddl)
             logger.info("在目标库创建表: %s", table_name)
         elif not resume_mode:
