@@ -1,0 +1,106 @@
+# ====================================================================== #
+#              优化版同步配置文件（支持复杂场景）
+# ====================================================================== #
+# 本配置在原有基础上增加了以下优化特性配置：
+# 1. 大事务拆分 - 避免单事务过大导致锁表
+# 2. 智能分页 - 根据数据分布动态调整查询策略
+# 3. 错误重试 - 批量失败降级逐行，死信队列
+# 4. 自适应调优 - 根据数据库负载动态调整参数
+# 5. 背压控制 - 实时同步队列过载保护
+# 6. 一致性校验 - 数据完整性校验
+# ====================================================================== #
+
+source:
+  type: "mysql"                    # 源数据库类型: mysql | db2 | oracle
+  host: "your-cloud-mysql-host.rds.amazonaws.com"
+  port: 3306
+  user: "reader"
+  password: "your_password"
+  database: "source_db"
+  charset: "utf8mb4"
+
+target:
+  type: "mysql"                    # 目标数据库类型: mysql | db2 | oracle
+  host: "127.0.0.1"
+  port: 3306
+  user: "root"
+  password: "your_password"
+  database: "target_db"
+  charset: "utf8mb4"
+
+sync:
+  # ---- 基础同步配置 ----
+  parallel_tables: 4               # 并行同步的表数量
+  chunk_size: 50000                # 按主键分块的大小（基础值，智能分页会动态调整）
+  batch_insert_size: 5000          # 批量插入的行数（基础值，自适应调优会动态调整）
+  tables:                          # 要同步的表列表（留空则同步所有表）
+    - "table_a"
+    - "table_b"
+    - "table_c"
+
+  # ---- 优化特性开关 ----
+  use_optimized_engine: true       # 是否使用优化版引擎（推荐开启）
+  enable_transaction_splitter: true  # 大事务拆分（避免单事务过大锁表）
+  enable_smart_pagination: true    # 智能分页（根据数据分布调整chunk大小）
+  enable_retry: true               # 错误重试和死信队列
+  enable_adaptive_tuning: true     # 自适应性能调优（根据负载动态调整参数）
+  enable_consistency_check: false  # 同步后一致性校验（会增加耗时，建议抽样）
+
+  # ---- 大事务拆分配置 ----
+  max_transaction_rows: 1000       # 单事务最大行数（超过会拆分为多个子事务）
+  commit_interval_ms: 0            # 强制提交间隔（毫秒），0表示不按时间提交
+
+  # ---- 智能分页配置 ----
+  min_chunk_size: 1000             # 最小chunk大小
+  max_chunk_size: 100000           # 最大chunk大小
+  target_fetch_time_ms: 1000       # 目标单次查询耗时（毫秒）
+
+  # ---- 错误重试配置 ----
+  max_retries: 3                   # 最大重试次数
+  retry_strategy: "exponential_backoff"  # 重试策略: immediate | linear_backoff | exponential_backoff
+  initial_delay_ms: 100            # 初始重试延迟（毫秒）
+  max_delay_ms: 10000              # 最大重试延迟（毫秒）
+
+  # ---- 自适应调优配置 ----
+  min_batch_size: 100              # 最小批量大小
+  max_batch_size: 50000            # 最大批量大小
+  min_parallelism: 1               # 最小并行数
+  max_parallelism: 16              # 最大并行数
+  latency_threshold_ms: 5000       # 延迟阈值（毫秒），超过则开始降载
+
+  # ---- 实时同步优化配置 ----
+  enable_backpressure: true        # 背压控制（队列过载时暂停CDC读取）
+  enable_event_merge: true         # 大事务事件合并（同一行多次操作合并）
+  enable_batch_upsert: true        # 批量upsert优化（MySQL目标库有效）
+  event_queue_size: 10000          # 事件队列最大大小
+  queue_high_watermark: 8000       # 队列高水位线（触发背压）
+  queue_low_watermark: 3000        # 队列低水位线（恢复生产）
+  max_memory_mb: 512               # 最大内存使用（MB），超过触发背压
+  realtime_batch_size: 100         # 实时同步批量处理大小
+  realtime_batch_timeout: 1.0      # 实时同步批量超时（秒）
+
+  # ---- 一致性校验配置 ----
+  consistency_sample_ratio: 0.1    # 一致性校验抽样比例（0-1）
+  consistency_max_sample_rows: 10000  # 一致性校验最大抽样行数
+
+
+# ====================================================================== #
+#                         Oracle 源端示例配置
+# ====================================================================== #
+# source:
+#   type: "oracle"
+#   host: "oracle-server.example.com"
+#   port: 1521
+#   user: "sync_user"
+#   password: "your_password"
+#   database: "ORCL"              # schema 名
+#   service_name: "ORCL"          # 或使用 sid
+#   # client_lib_dir: "/opt/oracle/instantclient"  # 可选，Oracle客户端库路径
+#
+# target:
+#   type: "mysql"
+#   host: "127.0.0.1"
+#   port: 3306
+#   user: "root"
+#   password: "your_password"
+#   database: "target_db"
