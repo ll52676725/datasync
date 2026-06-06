@@ -15,7 +15,7 @@ import threading
 import queue
 import psutil
 import os
-from typing import Dict, List, Any, Optional, Callable
+from typing import Dict, List, Any, Optional, Callable, Tuple
 from collections import defaultdict
 
 from db_adapter import get_adapter, BaseDBAdapter
@@ -251,47 +251,78 @@ class RealtimeSyncEngineOptimized:
             self._event_merge_buffer.clear()
             return events
 
+    def _update_position_from_event(self, event: CDCEvent):
+        """
+        从事件更新当前 binlog/SCN 位置，并持久化。
+        """
+        if hasattr(event, 'binlog_file'):
+            if event.binlog_file:
+                self.stats["current_binlog_file"] = event.binlog_file
+            if event.binlog_pos > 0:
+                self.stats["current_binlog_pos"] = event.binlog_pos
+        if hasattr(event, 'scn') and event.scn is not None:
+            self.stats["current_scn"] = event.scn
+
+        if self.task_id:
+            db2_store.update_realtime_task_stats(self.task_id, self.stats)
+
     def _process_batch(self, events: List[CDCEvent]):
         """
         批量处理 CDC 事件（优化版）。
 
         支持按表批量 upsert，提升写入性能。
+
+        核心改进：
+        1. 逐表处理，每表成功后立即更新位置
+        2. 异常时保存最后成功位置，避免重复消费
         """
         if not events:
             return
 
         tgt_conn = self.tgt_adapter.create_connection()
+        last_successful_event: Optional[CDCEvent] = None
+        processed_count = 0
+
         try:
             by_table: Dict[str, List[CDCEvent]] = defaultdict(list)
             for event in events:
                 by_table[event.table_name].append(event)
 
             for table_name, table_events in by_table.items():
-                self._sync_table_events_optimized(tgt_conn, table_name, table_events)
+                success_count, table_last_success = self._sync_table_events_optimized(
+                    tgt_conn, table_name, table_events
+                )
+                if table_last_success is not None:
+                    last_successful_event = table_last_success
+                    processed_count += success_count
+                    self._update_position_from_event(last_successful_event)
 
-            self.stats["synced_events"] += len(events)
+            self.stats["synced_events"] += processed_count
             self.stats["last_sync_time"] = time.time()
 
-            last_event = events[-1]
-            if hasattr(last_event, 'binlog_file'):
-                if last_event.binlog_file:
-                    self.stats["current_binlog_file"] = last_event.binlog_file
-                if last_event.binlog_pos > 0:
-                    self.stats["current_binlog_pos"] = last_event.binlog_pos
-            if hasattr(last_event, 'scn') and last_event.scn is not None:
-                self.stats["current_scn"] = last_event.scn
-
-            if self.task_id:
-                db2_store.update_realtime_task_stats(self.task_id, self.stats)
+            if processed_count > 0 and last_successful_event is not None:
+                self._update_position_from_event(last_successful_event)
 
         except Exception as e:
-            logger.error("批量处理事件失败: %s", e)
-            self.stats["failed_events"] += len(events)
+            logger.error(
+                "[优化版] 批量处理事件失败: 已成功 %d/%d 行, 错误: %s",
+                processed_count, len(events), e,
+            )
+            self.stats["failed_events"] += (len(events) - processed_count)
+
+            if last_successful_event is not None:
+                logger.warning(
+                    "[优化版] 异常时保存最后成功位置: binlog=%s, pos=%d, scn=%s",
+                    getattr(last_successful_event, 'binlog_file', ''),
+                    getattr(last_successful_event, 'binlog_pos', 0),
+                    getattr(last_successful_event, 'scn', None),
+                )
+                self._update_position_from_event(last_successful_event)
             raise
         finally:
             self.tgt_adapter.close_connection(tgt_conn)
 
-    def _sync_table_events_optimized(self, conn, table_name: str, events: List[CDCEvent]):
+    def _sync_table_events_optimized(self, conn, table_name: str, events: List[CDCEvent]) -> Tuple[int, Optional[CDCEvent]]:
         """
         优化版单表 CDC 事件同步。
 
@@ -299,11 +330,17 @@ class RealtimeSyncEngineOptimized:
         - MySQL 批量 upsert
         - 失败重试
         - 死信队列
+
+        Returns:
+            (成功行数, 最后成功事件) 元组
         """
         pk_col = self.table_primary_keys.get(table_name)
         if not pk_col:
             logger.warning("表 %s 无主键，跳过同步", table_name)
-            return
+            return (0, None)
+
+        success_count = 0
+        last_success: Optional[CDCEvent] = None
 
         insert_events = []
         update_events = []
@@ -323,16 +360,27 @@ class RealtimeSyncEngineOptimized:
                 self._batch_upsert_mysql,
                 conn, table_name, all_upsert, pk_col,
             )
-            if not success:
+            if success:
+                success_count += len(all_upsert)
+                last_success = all_upsert[-1]
+            else:
                 logger.warning("批量 upsert 失败，降级为逐行处理: %s", error)
                 for event in all_upsert:
-                    self._upsert_with_retry(conn, table_name, event, pk_col)
+                    if self._upsert_with_retry(conn, table_name, event, pk_col):
+                        success_count += 1
+                        last_success = event
         else:
             for event in insert_events + update_events:
-                self._upsert_with_retry(conn, table_name, event, pk_col)
+                if self._upsert_with_retry(conn, table_name, event, pk_col):
+                    success_count += 1
+                    last_success = event
 
         for event in delete_events:
-            self._delete_with_retry(conn, table_name, event, pk_col)
+            if self._delete_with_retry(conn, table_name, event, pk_col):
+                success_count += 1
+                last_success = event
+
+        return (success_count, last_success)
 
     def _batch_upsert_mysql(self, conn, table_name: str, events: List[CDCEvent], pk_col: str):
         """MySQL 批量 upsert 优化。"""
@@ -362,8 +410,12 @@ class RealtimeSyncEngineOptimized:
         conn.commit()
         logger.debug("批量 upsert 表 %s: %d 行", table_name, len(rows))
 
-    def _upsert_with_retry(self, conn, table_name: str, event: CDCEvent, pk_col: str):
-        """带重试的 upsert。"""
+    def _upsert_with_retry(self, conn, table_name: str, event: CDCEvent, pk_col: str) -> bool:
+        """带重试的 upsert。
+
+        Returns:
+            True 表示成功，False 表示失败（已进入死信队列）
+        """
         success, error = self.retry_mgr.execute_with_retry(
             lambda: self.tgt_adapter.upsert_row(conn, table_name, event.data, pk_col)
         )
@@ -374,12 +426,17 @@ class RealtimeSyncEngineOptimized:
                 data=event.data,
                 error=str(error),
             )
+        return success
 
-    def _delete_with_retry(self, conn, table_name: str, event: CDCEvent, pk_col: str):
-        """带重试的 delete。"""
+    def _delete_with_retry(self, conn, table_name: str, event: CDCEvent, pk_col: str) -> bool:
+        """带重试的 delete。
+
+        Returns:
+            True 表示成功，False 表示失败（已进入死信队列）
+        """
         pk_value = event.data.get(pk_col)
         if pk_value is None:
-            return
+            return False
         success, error = self.retry_mgr.execute_with_retry(
             lambda: self.tgt_adapter.delete_row(conn, table_name, pk_col, pk_value)
         )
@@ -390,6 +447,7 @@ class RealtimeSyncEngineOptimized:
                 data=event.data,
                 error=str(error),
             )
+        return success
 
     def _worker_loop(self):
         """

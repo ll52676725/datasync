@@ -197,59 +197,93 @@ class RealtimeSyncEngine:
     #                        批量同步到目标库
     # ------------------------------------------------------------------ #
 
+    def _update_position_from_event(self, event: CDCEvent):
+        """
+        从事件更新当前 binlog/SCN 位置，并持久化。
+
+        每成功处理一个事件就调用此方法，确保异常时也能保留最后成功位置。
+        """
+        if hasattr(event, 'binlog_file'):
+            if event.binlog_file:
+                self.stats["current_binlog_file"] = event.binlog_file
+            if event.binlog_pos > 0:
+                self.stats["current_binlog_pos"] = event.binlog_pos
+        if hasattr(event, 'scn') and event.scn is not None:
+            self.stats["current_scn"] = event.scn
+
+        if self.task_id:
+            db2_store.update_realtime_task_stats(self.task_id, self.stats)
+
     def _process_batch(self, events: List[CDCEvent]):
         """
         批量处理 CDC 事件，同步到目标数据库。
 
-        按表分组后批量处理，提升性能。
+        核心改进：
+        1. 逐表处理，每表成功后立即更新位置
+        2. 逐行跟踪最后成功事件，异常时也保存位置
+        3. 异常分支强制持久化最后成功位置，避免重复消费
         """
         if not events:
             return
 
         tgt_conn = self.tgt_adapter.create_connection()
+        last_successful_event: Optional[CDCEvent] = None
+        processed_count = 0
+
         try:
             by_table: Dict[str, List[CDCEvent]] = defaultdict(list)
             for event in events:
                 by_table[event.table_name].append(event)
 
             for table_name, table_events in by_table.items():
-                self._sync_table_events(tgt_conn, table_name, table_events)
+                table_last_success = self._sync_table_events(tgt_conn, table_name, table_events)
+                if table_last_success is not None:
+                    last_successful_event = table_last_success
+                    processed_count += len(table_events)
+                    self._update_position_from_event(last_successful_event)
 
-            self.stats["synced_events"] += len(events)
+            self.stats["synced_events"] += processed_count
             self.stats["last_sync_time"] = time.time()
 
-            last_event = events[-1]
-            if hasattr(last_event, 'binlog_file'):
-                if last_event.binlog_file:
-                    self.stats["current_binlog_file"] = last_event.binlog_file
-                if last_event.binlog_pos > 0:
-                    self.stats["current_binlog_pos"] = last_event.binlog_pos
-            if hasattr(last_event, 'scn') and last_event.scn is not None:
-                self.stats["current_scn"] = last_event.scn
-
-            if self.task_id:
-                db2_store.update_realtime_task_stats(self.task_id, self.stats)
+            if processed_count > 0 and last_successful_event is not None:
+                self._update_position_from_event(last_successful_event)
 
         except Exception as e:
-            logger.error("批量处理事件失败: %s", e)
-            self.stats["failed_events"] += len(events)
+            logger.error(
+                "批量处理事件失败: 已成功 %d/%d 行, 错误: %s",
+                processed_count, len(events), e,
+            )
+            self.stats["failed_events"] += (len(events) - processed_count)
+
+            if last_successful_event is not None:
+                logger.warning(
+                    "异常时保存最后成功位置: binlog=%s, pos=%d, scn=%s",
+                    getattr(last_successful_event, 'binlog_file', ''),
+                    getattr(last_successful_event, 'binlog_pos', 0),
+                    getattr(last_successful_event, 'scn', None),
+                )
+                self._update_position_from_event(last_successful_event)
             raise
         finally:
             self.tgt_adapter.close_connection(tgt_conn)
 
-    def _sync_table_events(self, conn, table_name: str, events: List[CDCEvent]):
+    def _sync_table_events(self, conn, table_name: str, events: List[CDCEvent]) -> Optional[CDCEvent]:
         """
         同步单张表的 CDC 事件。
 
         策略：
         - INSERT/UPDATE: 使用 upsert（幂等）
         - DELETE: 使用 delete
+
+        Returns:
+            最后一个成功处理的事件（用于位置更新），全部失败返回 None
         """
         pk_col = self.table_primary_keys.get(table_name)
         if not pk_col:
             logger.warning("表 %s 无主键，跳过同步", table_name)
-            return
+            return None
 
+        last_success = None
         for event in events:
             try:
                 if event.event_type in (CDCAction.INSERT, CDCAction.UPDATE):
@@ -258,12 +292,16 @@ class RealtimeSyncEngine:
                     pk_value = event.data.get(pk_col)
                     if pk_value is not None:
                         self.tgt_adapter.delete_row(conn, table_name, pk_col, pk_value)
+                last_success = event
             except Exception as e:
                 logger.error(
-                    "同步事件失败: table=%s, type=%s, error=%s",
-                    table_name, event.event_type, e,
+                    "同步事件失败: table=%s, type=%s, pk=%s, error=%s",
+                    table_name, event.event_type,
+                    event.data.get(pk_col), e,
                 )
                 raise
+
+        return last_success
 
     # ------------------------------------------------------------------ #
     #                        工作线程（队列消费）
