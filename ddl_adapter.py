@@ -542,9 +542,19 @@ class DDLGenerator:
     
     def __init__(self, db_type: str):
         self.db_type = db_type
+        self._identifier_pattern = __import__('re').compile(r'^[A-Za-z0-9_]+$')
+
+    def _validate_identifier(self, name: str) -> str:
+        if not self._identifier_pattern.match(name):
+            raise ValueError(f"Invalid SQL identifier: {name}")
+        return name
+
+    def _escape_sql_string(self, value: str) -> str:
+        return value.replace("'", "''").replace("\\", "\\\\")
 
     def quote_identifier(self, name: str) -> str:
         """引用标识符（表名、列名等）。"""
+        self._validate_identifier(name)
         raise NotImplementedError
 
     def generate_create_table(self, schema: TableSchema) -> str:
@@ -567,6 +577,7 @@ class MySQLDDLGenerator(DDLGenerator):
         super().__init__("mysql")
 
     def quote_identifier(self, name: str) -> str:
+        self._validate_identifier(name)
         return f"`{name}`"
 
     def generate_create_table(self, schema: TableSchema) -> str:
@@ -585,7 +596,8 @@ class MySQLDDLGenerator(DDLGenerator):
         lines.append(") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4")
         
         if schema.comment:
-            lines.append(f" COMMENT='{schema.comment}'")
+            escaped_comment = self._escape_sql_string(schema.comment)
+            lines.append(f" COMMENT='{escaped_comment}'")
         
         return "\n".join(lines)
 
@@ -606,10 +618,15 @@ class MySQLDDLGenerator(DDLGenerator):
             parts.append("AUTO_INCREMENT")
         
         if column.default_value is not None:
-            parts.append(f"DEFAULT {column.default_value}")
+            if isinstance(column.default_value, str):
+                escaped_default = self._escape_sql_string(column.default_value)
+                parts.append(f"DEFAULT '{escaped_default}'")
+            else:
+                parts.append(f"DEFAULT {column.default_value}")
         
         if column.comment:
-            parts.append(f"COMMENT '{column.comment}'")
+            escaped_comment = self._escape_sql_string(column.comment)
+            parts.append(f"COMMENT '{escaped_comment}'")
         
         return " ".join(parts)
 
@@ -625,6 +642,7 @@ class DB2DDLGenerator(DDLGenerator):
         super().__init__("db2")
 
     def quote_identifier(self, name: str) -> str:
+        self._validate_identifier(name)
         return f'"{name.upper()}"'
 
     def generate_create_table(self, schema: TableSchema) -> str:
@@ -638,6 +656,7 @@ class DB2DDLGenerator(DDLGenerator):
         if schema.primary_keys:
             pk_cols = ", ".join(self.quote_identifier(pk) for pk in schema.primary_keys)
             constraint_name = f"PK_{schema.table_name.upper()[:20]}"
+            self._validate_identifier(constraint_name)
             col_defs.append(f"  CONSTRAINT {constraint_name} PRIMARY KEY ({pk_cols})")
         
         lines.append(",\n".join(col_defs))
@@ -661,7 +680,11 @@ class DB2DDLGenerator(DDLGenerator):
             parts.append("NOT NULL")
         
         if not column.auto_increment and column.default_value is not None:
-            parts.append(f"WITH DEFAULT {column.default_value}")
+            if isinstance(column.default_value, str):
+                escaped_default = self._escape_sql_string(column.default_value)
+                parts.append(f"WITH DEFAULT '{escaped_default}'")
+            else:
+                parts.append(f"WITH DEFAULT {column.default_value}")
         
         return " ".join(parts)
 
@@ -677,6 +700,7 @@ class OracleDDLGenerator(DDLGenerator):
         super().__init__("oracle")
 
     def quote_identifier(self, name: str) -> str:
+        self._validate_identifier(name)
         return f'"{name.upper()}"'
 
     def generate_create_table(self, schema: TableSchema) -> str:
@@ -690,13 +714,15 @@ class OracleDDLGenerator(DDLGenerator):
         if schema.primary_keys:
             pk_cols = ", ".join(self.quote_identifier(pk) for pk in schema.primary_keys)
             constraint_name = f"PK_{schema.table_name.upper()[:20]}"
+            self._validate_identifier(constraint_name)
             col_defs.append(f"  CONSTRAINT {constraint_name} PRIMARY KEY ({pk_cols})")
         
         lines.append(",\n".join(col_defs))
         lines.append(")")
         
         if schema.comment:
-            lines.append(f"COMMENT ON TABLE {self.quote_identifier(schema.table_name)} IS '{schema.comment}'")
+            escaped_comment = self._escape_sql_string(schema.comment)
+            lines.append(f"COMMENT ON TABLE {self.quote_identifier(schema.table_name)} IS '{escaped_comment}'")
         
         return "\n".join(lines)
 
@@ -716,7 +742,11 @@ class OracleDDLGenerator(DDLGenerator):
             parts.append("NOT NULL")
         
         if not column.auto_increment and column.default_value is not None:
-            parts.append(f"DEFAULT {column.default_value}")
+            if isinstance(column.default_value, str):
+                escaped_default = self._escape_sql_string(column.default_value)
+                parts.append(f"DEFAULT '{escaped_default}'")
+            else:
+                parts.append(f"DEFAULT {column.default_value}")
         
         return " ".join(parts)
 
