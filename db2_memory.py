@@ -287,9 +287,15 @@ class DB2MemoryStore:
                 self._realtime_tasks[task_id]["binlog_pos"] = stats["current_binlog_pos"]
 
     def get_realtime_task_binlog_position(self, task_id: str) -> Optional[Dict[str, Any]]:
-        """获取实时任务的 binlog 断点位置。"""
+        """获取实时任务的断点位置（支持 MySQL binlog 和 Oracle SCN）。"""
         task = self.get_realtime_task(task_id)
-        if task and task.get("binlog_file"):
+        if not task:
+            return None
+        if task.get("current_scn"):
+            return {
+                "current_scn": task["current_scn"],
+            }
+        if task.get("binlog_file"):
             return {
                 "log_file": task["binlog_file"],
                 "log_pos": task.get("binlog_pos", 0),

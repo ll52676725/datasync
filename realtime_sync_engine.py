@@ -286,12 +286,38 @@ class RealtimeSyncEngine:
     #                        启动 / 停止控制
     # ------------------------------------------------------------------ #
 
-    def start(self, resume_from_binlog: bool = False):
+    def check_cdc_environment(self) -> Dict[str, Any]:
+        """
+        检查 CDC 环境是否满足要求。
+
+        Returns:
+            检测结果字典，包含各项检测详情和引导建议
+        """
+        logger.info("检查 CDC 实时同步环境...")
+        conn = self.src_adapter.create_connection()
+        try:
+            result = self.src_adapter.check_cdc_environment(conn)
+            if result["passed"]:
+                logger.info("CDC 环境检测通过")
+            else:
+                logger.warning("CDC 环境检测未通过: %s", result["summary"])
+                for check in result["checks"]:
+                    if not check["passed"]:
+                        logger.warning("  - %s: %s", check["name"], check["message"])
+            return result
+        finally:
+            self.src_adapter.close_connection(conn)
+
+    def start(self, resume_from_binlog: bool = False, skip_env_check: bool = False):
         """
         启动实时同步。
 
         Args:
             resume_from_binlog: 是否从上次记录的 binlog 位置恢复
+            skip_env_check: 是否跳过环境检测（不推荐，仅用于已确认环境正确的场景）
+
+        Raises:
+            RuntimeError: 如果环境检测未通过且不允许跳过
         """
         if self.cdc_stream:
             logger.warning("实时同步已在运行")
@@ -300,23 +326,47 @@ class RealtimeSyncEngine:
         if not self.src_adapter.supports_cdc():
             raise RuntimeError(f"源数据库类型 {self.src_adapter.db_type} 不支持 CDC")
 
+        if not skip_env_check:
+            env_result = self.check_cdc_environment()
+            if not env_result["passed"]:
+                failed_checks = [c for c in env_result["checks"] if not c["passed"]]
+                error_msg = (
+                    f"CDC 环境检测未通过，有 {len(failed_checks)} 项需要配置。\n"
+                    f"问题汇总：{env_result['summary']}\n\n"
+                    f"详细问题与解决建议：\n"
+                )
+                for i, check in enumerate(failed_checks, 1):
+                    error_msg += f"\n{i}. {check['name']}: {check['message']}\n"
+                    error_msg += f"   建议：{check['guidance']}\n"
+                logger.error(error_msg)
+                raise RuntimeError(error_msg)
+
         logger.info("启动实时同步...")
         self.stats["start_time"] = time.time()
         self.stop_flag["stop"] = False
 
-        cdc_kwargs = {
-            "server_id": self.server_id,
-            "blocking": True,
-            "only_tables": self.tables,
-        }
-
-        if resume_from_binlog and self.task_id:
-            saved_pos = db2_store.get_realtime_task_binlog_position(self.task_id)
-            if saved_pos:
-                cdc_kwargs["resume_stream"] = True
-                cdc_kwargs["log_file"] = saved_pos.get("log_file")
-                cdc_kwargs["log_pos"] = saved_pos.get("log_pos")
-                logger.info("从断点恢复同步: %s @ %s", saved_pos["log_file"], saved_pos["log_pos"])
+        if self.src_adapter.db_type == "oracle":
+            cdc_kwargs = {
+                "interval": self.sync_cfg.get("logminer_interval", 2),
+            }
+            if resume_from_binlog and self.task_id:
+                saved_pos = db2_store.get_realtime_task_binlog_position(self.task_id)
+                if saved_pos and saved_pos.get("current_scn"):
+                    cdc_kwargs["start_scn"] = saved_pos["current_scn"]
+                    logger.info("从断点恢复同步: SCN=%d", saved_pos["current_scn"])
+        else:
+            cdc_kwargs = {
+                "server_id": self.server_id,
+                "blocking": True,
+                "only_tables": self.tables,
+            }
+            if resume_from_binlog and self.task_id:
+                saved_pos = db2_store.get_realtime_task_binlog_position(self.task_id)
+                if saved_pos:
+                    cdc_kwargs["resume_stream"] = True
+                    cdc_kwargs["log_file"] = saved_pos.get("log_file")
+                    cdc_kwargs["log_pos"] = saved_pos.get("log_pos")
+                    logger.info("从断点恢复同步: %s @ %s", saved_pos["log_file"], saved_pos["log_pos"])
 
         self.cdc_stream, self.cdc_thread = self.src_adapter.create_cdc_stream(
             tables=self.tables,
@@ -343,7 +393,10 @@ class RealtimeSyncEngine:
 
         if self.cdc_stream:
             try:
-                self.cdc_stream.close()
+                if self.src_adapter.db_type == "oracle":
+                    self.cdc_stream["stop"] = True
+                else:
+                    self.cdc_stream.close()
             except Exception as e:
                 logger.error("关闭 CDC 流出错: %s", e)
 
@@ -358,13 +411,18 @@ class RealtimeSyncEngine:
         self.worker_thread = None
 
         if self.task_id:
-            db2_store.update_realtime_task(
-                self.task_id,
-                status="stopped",
-                message="实时同步已停止",
-                binlog_file=self.stats["current_binlog_file"],
-                binlog_pos=self.stats["current_binlog_pos"],
-            )
+            update_kwargs = {
+                "status": "stopped",
+                "message": "实时同步已停止",
+            }
+            if self.src_adapter.db_type == "oracle":
+                update_kwargs["binlog_file"] = ""
+                update_kwargs["binlog_pos"] = 0
+                update_kwargs["current_scn"] = self.stats.get("current_scn", 0)
+            else:
+                update_kwargs["binlog_file"] = self.stats["current_binlog_file"]
+                update_kwargs["binlog_pos"] = self.stats["current_binlog_pos"]
+            db2_store.update_realtime_task(self.task_id, **update_kwargs)
 
         logger.info("实时同步已停止")
 
@@ -407,7 +465,8 @@ class RealtimeTaskManager:
             self._engines[task_id] = engine
             return engine
 
-    def start_engine(self, task_id: str, resume_from_binlog: bool = False) -> bool:
+    def start_engine(self, task_id: str, resume_from_binlog: bool = False,
+                     skip_env_check: bool = False) -> bool:
         """启动指定任务的同步引擎。"""
         with self._lock:
             engine = self._engines.get(task_id)
@@ -417,7 +476,10 @@ class RealtimeTaskManager:
             if engine.is_running():
                 logger.warning("任务 %s 已在运行", task_id)
                 return True
-            engine.start(resume_from_binlog=resume_from_binlog)
+            engine.start(
+                resume_from_binlog=resume_from_binlog,
+                skip_env_check=skip_env_check,
+            )
             return True
 
     def stop_engine(self, task_id: str) -> bool:
@@ -472,7 +534,8 @@ realtime_manager = RealtimeTaskManager()
 # ====================================================================== #
 
 def start_realtime_sync(config: Dict[str, Any], task_id: str,
-                        resume_from_binlog: bool = False) -> bool:
+                        resume_from_binlog: bool = False,
+                        skip_env_check: bool = False) -> bool:
     """
     启动实时同步的便捷函数。
 
@@ -480,13 +543,18 @@ def start_realtime_sync(config: Dict[str, Any], task_id: str,
         config: 同步配置
         task_id: 任务 ID
         resume_from_binlog: 是否从断点恢复
+        skip_env_check: 是否跳过环境检测
 
     Returns:
         启动成功返回 True
     """
     try:
         engine = realtime_manager.create_engine(task_id, config)
-        return realtime_manager.start_engine(task_id, resume_from_binlog=resume_from_binlog)
+        return realtime_manager.start_engine(
+            task_id,
+            resume_from_binlog=resume_from_binlog,
+            skip_env_check=skip_env_check,
+        )
     except Exception as e:
         logger.error("启动实时同步失败: %s", e)
         db2_store.update_realtime_task(
@@ -495,6 +563,45 @@ def start_realtime_sync(config: Dict[str, Any], task_id: str,
             message=f"启动失败: {str(e)}",
         )
         return False
+
+
+def check_realtime_environment(config: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    检查实时同步环境的便捷函数。
+
+    Args:
+        config: 源数据库配置
+
+    Returns:
+        检测结果字典
+    """
+    try:
+        adapter = get_adapter(config["source"])
+        if not adapter.supports_cdc():
+            return {
+                "supported": False,
+                "passed": False,
+                "checks": [],
+                "summary": f"{adapter.db_type} 数据库不支持 CDC 实时同步",
+            }
+        conn = adapter.create_connection()
+        try:
+            return adapter.check_cdc_environment(conn)
+        finally:
+            adapter.close_connection(conn)
+    except Exception as e:
+        logger.error("检查实时同步环境失败: %s", e)
+        return {
+            "supported": True,
+            "passed": False,
+            "checks": [{
+                "name": "环境检测异常",
+                "passed": False,
+                "message": f"检测失败: {e}",
+                "guidance": "请检查数据库连接配置是否正确",
+            }],
+            "summary": f"环境检测异常: {e}",
+        }
 
 
 def stop_realtime_sync(task_id: str) -> bool:

@@ -68,6 +68,21 @@ def ensure_progress_table(tgt_cfg):
                 "INDEX `idx_table_name` (`table_name`)"
                 ") ENGINE=InnoDB DEFAULT CHARSET=utf8mb4"
             )
+        elif adapter.db_type == "oracle":
+            ddl = (
+                f'CREATE TABLE "{PROGRESS_TABLE}" ('
+                '"id" NUMBER(19) GENERATED ALWAYS AS IDENTITY PRIMARY KEY,'
+                '"table_name" VARCHAR2(128) NOT NULL UNIQUE,'
+                '"total_rows" NUMBER(19) NOT NULL DEFAULT 0,'
+                '"synced_rows" NUMBER(19) NOT NULL DEFAULT 0,'
+                '"primary_key" VARCHAR2(128) NOT NULL DEFAULT \'\','
+                '"last_pk_value" NUMBER(19) NOT NULL DEFAULT 0,'
+                '"status" VARCHAR2(32) NOT NULL DEFAULT \'pending\','
+                '"started_at" TIMESTAMP NULL,'
+                '"finished_at" TIMESTAMP NULL,'
+                '"updated_at" TIMESTAMP NOT NULL DEFAULT SYSTIMESTAMP'
+                ')'
+            )
         else:
             ddl = (
                 f'CREATE TABLE "{PROGRESS_TABLE}" ('
@@ -95,7 +110,22 @@ def ensure_progress_table(tgt_cfg):
 
 def _now_sql(adapter):
     """根据数据库类型返回获取当前时间的 SQL 表达式。"""
-    return "NOW()" if adapter.db_type == "mysql" else "CURRENT TIMESTAMP"
+    if adapter.db_type == "mysql":
+        return "NOW()"
+    elif adapter.db_type == "oracle":
+        return "SYSTIMESTAMP"
+    else:
+        return "CURRENT TIMESTAMP"
+
+
+def _placeholder(adapter, index: int = 1) -> str:
+    """根据数据库类型返回参数占位符。"""
+    if adapter.db_type == "mysql":
+        return "%s"
+    elif adapter.db_type == "oracle":
+        return f":{index}"
+    else:
+        return "?"
 
 
 def get_progress(tgt_cfg, table_name):
@@ -114,8 +144,9 @@ def get_progress(tgt_cfg, table_name):
     try:
         qt = adapter.quote_identifier(PROGRESS_TABLE)
         cur = conn.cursor()
+        ph = _placeholder(adapter, 1)
         cur.execute(
-            f"SELECT * FROM {qt} WHERE table_name = %s",
+            f"SELECT * FROM {qt} WHERE table_name = {ph}",
             (table_name,),
         )
         row = cur.fetchone()
@@ -141,9 +172,9 @@ def init_progress(tgt_cfg, table_name, total_rows, primary_key):
     conn = adapter.create_connection()
     try:
         qt = adapter.quote_identifier(PROGRESS_TABLE)
-        now_fn = _now_sql(adapter)
+        cur = conn.cursor()
+
         if adapter.db_type == "mysql":
-            cur = conn.cursor()
             cur.execute(
                 f"INSERT INTO {qt} "
                 "(table_name, total_rows, primary_key, status, started_at) "
@@ -155,9 +186,27 @@ def init_progress(tgt_cfg, table_name, total_rows, primary_key):
                 "started_at = NOW()",
                 (table_name, total_rows, primary_key),
             )
-            conn.commit()
+        elif adapter.db_type == "oracle":
+            cur.execute(
+                f"SELECT COUNT(*) FROM {qt} WHERE table_name = :1",
+                (table_name,),
+            )
+            exists = cur.fetchone()[0] > 0
+            if exists:
+                cur.execute(
+                    f"UPDATE {qt} SET total_rows = :1, primary_key = :2, "
+                    f"status = 'running', started_at = SYSTIMESTAMP "
+                    f"WHERE table_name = :3",
+                    (total_rows, primary_key, table_name),
+                )
+            else:
+                cur.execute(
+                    f"INSERT INTO {qt} "
+                    "(table_name, total_rows, primary_key, status, started_at) "
+                    "VALUES (:1, :2, :3, 'running', SYSTIMESTAMP)",
+                    (table_name, total_rows, primary_key),
+                )
         else:
-            cur = conn.cursor()
             cur.execute(
                 f"SELECT COUNT(*) FROM {qt} WHERE table_name = ?",
                 (table_name,),
@@ -177,7 +226,7 @@ def init_progress(tgt_cfg, table_name, total_rows, primary_key):
                     "VALUES (?, ?, ?, 'running', CURRENT TIMESTAMP)",
                     (table_name, total_rows, primary_key),
                 )
-            conn.commit()
+        conn.commit()
         logger.debug("初始化进度: table=%s, total_rows=%d, pk=%s",
                       table_name, total_rows, primary_key)
     finally:
@@ -198,12 +247,17 @@ def update_progress(tgt_cfg, table_name, synced_rows, last_pk_value):
     conn = adapter.create_connection()
     try:
         qt = adapter.quote_identifier(PROGRESS_TABLE)
-        now_fn = _now_sql(adapter)
         cur = conn.cursor()
         if adapter.db_type == "mysql":
             cur.execute(
                 f"UPDATE {qt} SET synced_rows = %s, last_pk_value = %s, "
                 f"updated_at = NOW() WHERE table_name = %s",
+                (synced_rows, last_pk_value, table_name),
+            )
+        elif adapter.db_type == "oracle":
+            cur.execute(
+                f"UPDATE {qt} SET synced_rows = :1, last_pk_value = :2, "
+                f"updated_at = SYSTIMESTAMP WHERE table_name = :3",
                 (synced_rows, last_pk_value, table_name),
             )
         else:
@@ -235,6 +289,12 @@ def mark_progress_done(tgt_cfg, table_name, total_synced):
             cur.execute(
                 f"UPDATE {qt} SET synced_rows = %s, status = 'done', "
                 f"finished_at = NOW() WHERE table_name = %s",
+                (total_synced, table_name),
+            )
+        elif adapter.db_type == "oracle":
+            cur.execute(
+                f"UPDATE {qt} SET synced_rows = :1, status = 'done', "
+                f"finished_at = SYSTIMESTAMP WHERE table_name = :2",
                 (total_synced, table_name),
             )
         else:
@@ -269,6 +329,12 @@ def mark_progress_failed(tgt_cfg, table_name, error):
                 f"WHERE table_name = %s",
                 (table_name,),
             )
+        elif adapter.db_type == "oracle":
+            cur.execute(
+                f"UPDATE {qt} SET status = 'failed', updated_at = SYSTIMESTAMP "
+                f"WHERE table_name = :1",
+                (table_name,),
+            )
         else:
             cur.execute(
                 f"UPDATE {qt} SET status = 'failed', updated_at = CURRENT TIMESTAMP "
@@ -298,6 +364,8 @@ def reset_progress(tgt_cfg, table_name=None):
         if table_name:
             if adapter.db_type == "mysql":
                 cur.execute(f"DELETE FROM {qt} WHERE table_name = %s", (table_name,))
+            elif adapter.db_type == "oracle":
+                cur.execute(f"DELETE FROM {qt} WHERE table_name = :1", (table_name,))
             else:
                 cur.execute(f"DELETE FROM {qt} WHERE table_name = ?", (table_name,))
             logger.info("重置表进度: %s", table_name)

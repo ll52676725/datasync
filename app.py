@@ -38,6 +38,7 @@ from realtime_sync_engine import (
     stop_realtime_sync,
     get_realtime_stats,
     list_running_realtime_tasks,
+    check_realtime_environment,
 )
 from sync_orchestrator import (
     smart_sync_manager,
@@ -493,7 +494,15 @@ def create_realtime_task():
 @app.route("/api/realtime/tasks/<task_id>/start", methods=["POST"])
 @login_required
 def start_realtime_task(task_id):
-    """启动实时同步任务。"""
+    """
+    启动实时同步任务。
+
+    请求体可选参数:
+    {
+        "resume_from_binlog": false,  # 是否从断点恢复
+        "skip_env_check": false       # 是否跳过环境检测（不推荐）
+    }
+    """
     task = db2_store.get_realtime_task(task_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
@@ -507,10 +516,20 @@ def start_realtime_task(task_id):
 
     data = request.get_json() or {}
     resume_from_binlog = data.get("resume_from_binlog", False)
+    skip_env_check = data.get("skip_env_check", False)
 
     db2_store.update_realtime_task(task_id, status="starting", message="正在启动实时同步...")
 
-    success = start_realtime_sync(config, task_id, resume_from_binlog=resume_from_binlog)
+    try:
+        success = start_realtime_sync(
+            config, task_id,
+            resume_from_binlog=resume_from_binlog,
+            skip_env_check=skip_env_check,
+        )
+    except RuntimeError as e:
+        db2_store.update_realtime_task(task_id, status="failed", message=str(e))
+        return jsonify({"success": False, "message": str(e)}), 400
+
     if success:
         db2_store.update_realtime_task(
             task_id,
@@ -596,6 +615,30 @@ def delete_realtime_task(task_id):
     return jsonify({"success": False, "message": "删除失败"}), 500
 
 
+@app.route("/api/realtime/check-env/<config_name>", methods=["GET"])
+@login_required
+def check_realtime_env(config_name):
+    """
+    检查指定配置的实时同步（CDC）环境。
+
+    返回 CDC 环境检测结果，包含各项检测详情和配置引导建议。
+    """
+    config = db2_store.get_config(config_name)
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    result = check_realtime_environment(config)
+    logger.info(
+        "CDC 环境检测: %s, 结果: %s",
+        config_name, "通过" if result["passed"] else "未通过",
+    )
+
+    return jsonify({
+        "success": True,
+        "result": result,
+    })
+
+
 @app.route("/api/realtime/dashboard", methods=["GET"])
 @login_required
 def get_realtime_dashboard():
@@ -679,10 +722,44 @@ def create_smart_sync_task():
     return jsonify({"success": True, "message": "智能同步任务创建成功", "task": task})
 
 
+@app.route("/api/smart-sync/check-env/<config_name>", methods=["GET"])
+@login_required
+def check_smart_sync_env(config_name):
+    """
+    检查指定配置的智能同步环境。
+
+    返回完整的环境检测结果，包括数据库连接和 CDC 环境。
+    """
+    config = db2_store.get_config(config_name)
+    if not config:
+        return jsonify({"success": False, "message": "配置不存在"}), 404
+
+    from sync_orchestrator import SmartSyncOrchestrator
+    orchestrator = SmartSyncOrchestrator(config, "check_env_task", quick_days=7)
+    result = orchestrator.check_environment()
+
+    logger.info(
+        "智能同步环境检测: %s, 结果: %s",
+        config_name, "通过" if result["passed"] else "未通过",
+    )
+
+    return jsonify({
+        "success": True,
+        "result": result,
+    })
+
+
 @app.route("/api/smart-sync/tasks/<task_id>/start", methods=["POST"])
 @login_required
 def start_smart_sync_task(task_id):
-    """启动智能同步任务。"""
+    """
+    启动智能同步任务。
+
+    请求体可选参数:
+    {
+        "skip_env_check": false  # 是否跳过环境检测（不推荐）
+    }
+    """
     task = db2_store.get_smart_sync_task(task_id)
     if not task:
         return jsonify({"success": False, "message": "任务不存在"}), 404
@@ -698,13 +775,18 @@ def start_smart_sync_task(task_id):
     if not config:
         return jsonify({"success": False, "message": "配置不存在"}), 404
 
+    data = request.get_json() or {}
+    skip_env_check = data.get("skip_env_check", False)
+
     quick_days = task.get("quick_days", 7)
     db2_store.update_realtime_task(
         task_id, status="starting", message="正在启动智能同步...",
     )
 
     success = smart_sync_manager.start_smart_sync(
-        task_id, config, quick_days=quick_days,
+        task_id, config,
+        quick_days=quick_days,
+        skip_env_check=skip_env_check,
     )
     if success:
         logger.info("智能同步任务已启动: %s (用户: %s)", task_id, request.username)

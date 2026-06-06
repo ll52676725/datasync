@@ -470,9 +470,98 @@ class SmartSyncOrchestrator:
     #                           主执行流程
     # ------------------------------------------------------------------ #
 
-    def run(self) -> bool:
+    def check_environment(self) -> Dict[str, Any]:
+        """
+        检查智能同步环境是否满足要求。
+
+        检查内容：
+        1. 源数据库连接是否正常
+        2. 目标数据库连接是否正常
+        3. 如果源库支持 CDC，检查 CDC 环境
+
+        Returns:
+            检测结果字典
+        """
+        logger.info("检查智能同步环境...")
+        checks = []
+        all_passed = True
+
+        try:
+            src_conn = self.src_adapter.create_connection()
+            self.src_adapter.close_connection(src_conn)
+            checks.append({
+                "name": "源数据库连接",
+                "passed": True,
+                "message": "连接正常",
+                "guidance": "",
+            })
+        except Exception as e:
+            all_passed = False
+            checks.append({
+                "name": "源数据库连接",
+                "passed": False,
+                "message": f"连接失败: {e}",
+                "guidance": "请检查源数据库的 host、port、用户名、密码配置是否正确",
+            })
+
+        try:
+            tgt_conn = self.tgt_adapter.create_connection()
+            self.tgt_adapter.close_connection(tgt_conn)
+            checks.append({
+                "name": "目标数据库连接",
+                "passed": True,
+                "message": "连接正常",
+                "guidance": "",
+            })
+        except Exception as e:
+            all_passed = False
+            checks.append({
+                "name": "目标数据库连接",
+                "passed": False,
+                "message": f"连接失败: {e}",
+                "guidance": "请检查目标数据库的 host、port、用户名、密码配置是否正确",
+            })
+
+        cdc_result = None
+        if self.src_adapter.supports_cdc():
+            try:
+                src_conn = self.src_adapter.create_connection()
+                try:
+                    cdc_result = self.src_adapter.check_cdc_environment(src_conn)
+                    checks.extend(cdc_result["checks"])
+                    if not cdc_result["passed"]:
+                        all_passed = False
+                finally:
+                    self.src_adapter.close_connection(src_conn)
+            except Exception as e:
+                all_passed = False
+                checks.append({
+                    "name": "CDC 环境检测",
+                    "passed": False,
+                    "message": f"检测失败: {e}",
+                    "guidance": "请检查源数据库配置和权限",
+                })
+
+        if all_passed:
+            summary = "智能同步环境检测全部通过"
+        else:
+            failed_count = sum(1 for c in checks if not c["passed"])
+            summary = f"环境检测未通过，有 {failed_count} 项需要配置"
+
+        return {
+            "passed": all_passed,
+            "checks": checks,
+            "summary": summary,
+            "cdc_supported": self.src_adapter.supports_cdc(),
+            "cdc_result": cdc_result,
+        }
+
+    def run(self, skip_env_check: bool = False) -> bool:
         """
         执行完整的三阶段智能同步流程。
+
+        Args:
+            skip_env_check: 是否跳过环境检测（不推荐）
 
         Returns:
             True 表示全部阶段成功完成（实时同步已启动），False 表示某阶段失败
@@ -481,6 +570,29 @@ class SmartSyncOrchestrator:
         logger.info("智能同步编排引擎启动: 任务 %s", self.task_id)
         logger.info("三阶段策略: 快速增量 → 存量补全 → 实时同步")
         logger.info("=" * 60)
+
+        if not skip_env_check:
+            env_result = self.check_environment()
+            if not env_result["passed"]:
+                failed_checks = [c for c in env_result["checks"] if not c["passed"]]
+                error_msg = (
+                    f"智能同步环境检测未通过，有 {len(failed_checks)} 项需要配置。\n"
+                    f"问题汇总：{env_result['summary']}\n\n"
+                    f"详细问题与解决建议：\n"
+                )
+                for i, check in enumerate(failed_checks, 1):
+                    error_msg += f"\n{i}. {check['name']}: {check['message']}\n"
+                    if check.get("guidance"):
+                        error_msg += f"   建议：{check['guidance']}\n"
+                logger.error(error_msg)
+                db2_store.update_realtime_task(
+                    self.task_id,
+                    status="failed",
+                    message=f"环境检测未通过: {env_result['summary']}",
+                )
+                return False
+            else:
+                logger.info("智能同步环境检测通过")
 
         db2_store.update_realtime_task(
             self.task_id,
@@ -553,7 +665,7 @@ class SmartSyncManager:
         self._lock = threading.Lock()
 
     def start_smart_sync(self, task_id: str, config: Dict[str, Any],
-                         quick_days: int = 7) -> bool:
+                         quick_days: int = 7, skip_env_check: bool = False) -> bool:
         """
         启动智能同步任务。
 
@@ -561,6 +673,7 @@ class SmartSyncManager:
             task_id: 任务 ID
             config: 同步配置
             quick_days: 快速增量天数
+            skip_env_check: 是否跳过环境检测
 
         Returns:
             启动成功返回 True
@@ -575,7 +688,7 @@ class SmartSyncManager:
 
             def _run():
                 try:
-                    orchestrator.run()
+                    orchestrator.run(skip_env_check=skip_env_check)
                 except Exception as e:
                     logger.error("智能同步任务 %s 异常: %s", task_id, e)
                     db2_store.update_realtime_task(
@@ -634,7 +747,7 @@ smart_sync_manager = SmartSyncManager()
 # ====================================================================== #
 
 def start_smart_sync(config: Dict[str, Any], task_id: str,
-                     quick_days: int = 7) -> bool:
+                     quick_days: int = 7, skip_env_check: bool = False) -> bool:
     """
     启动智能同步的便捷函数。
 
@@ -642,6 +755,7 @@ def start_smart_sync(config: Dict[str, Any], task_id: str,
         config: 同步配置
         task_id: 任务 ID
         quick_days: 快速增量阶段同步最近 N 天的数据
+        skip_env_check: 是否跳过环境检测
 
     Returns:
         启动成功返回 True
@@ -649,7 +763,11 @@ def start_smart_sync(config: Dict[str, Any], task_id: str,
     try:
         db2_store.create_smart_sync_task(task_id, config.get("name", ""),
                                           "system", quick_days=quick_days)
-        return smart_sync_manager.start_smart_sync(task_id, config, quick_days=quick_days)
+        return smart_sync_manager.start_smart_sync(
+            task_id, config,
+            quick_days=quick_days,
+            skip_env_check=skip_env_check,
+        )
     except Exception as e:
         logger.error("启动智能同步失败: %s", e)
         db2_store.update_realtime_task(

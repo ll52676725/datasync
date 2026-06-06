@@ -7,13 +7,15 @@ let selectedTables = [];
 /** 数据库类型对应的默认端口 */
 const DB_DEFAULT_PORTS = {
     mysql: 3306,
-    db2: 50000
+    db2: 50000,
+    oracle: 1521
 };
 
 /** 数据库类型对应的标签 */
 const DB_TYPE_LABELS = {
     mysql: 'MySQL',
-    db2: 'DB2'
+    db2: 'DB2',
+    oracle: 'Oracle'
 };
 
 const pageTitles = {
@@ -390,6 +392,11 @@ async function saveConfig() {
 
         const sourceType = document.getElementById('sourceType').value;
         const targetType = document.getElementById('targetType').value;
+
+        const sourceServiceName = document.getElementById('sourceServiceName')?.value?.trim() || '';
+        const sourceSid = document.getElementById('sourceSid')?.value?.trim() || '';
+        const targetServiceName = document.getElementById('targetServiceName')?.value?.trim() || '';
+        const targetSid = document.getElementById('targetSid')?.value?.trim() || '';
 
         const config = {
             source: {
