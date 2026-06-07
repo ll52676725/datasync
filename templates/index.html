@@ -3,73 +3,107 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>数据同步系统 - 控制台</title>
-    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=2">
+    <title>数据同步平台 - DataSync Studio</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}?v=3">
 </head>
 <body>
     <div class="app-container">
         <aside class="sidebar">
             <div class="sidebar-header">
-                <div class="logo-small">
-                    <svg width="32" height="32" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
-                    </svg>
-                </div>
-                <div class="brand">
-                    <h2>Sync System</h2>
-                    <p>v1.0</p>
+                <div class="logo">
+                    <div class="logo-icon">
+                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                            <path d="M12 8v8" stroke-dasharray="2 2"></path>
+                            <path d="M8 12l4-4 4 4"></path>
+                        </svg>
+                    </div>
+                    <div class="logo-text">
+                        <h1>DataSync</h1>
+                        <p>Studio v2.0</p>
+                    </div>
                 </div>
             </div>
             
             <nav class="sidebar-nav">
-                <a href="#" class="nav-item active" data-tab="dashboard">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <rect x="3" y="3" width="7" height="9"></rect>
-                        <rect x="14" y="3" width="7" height="5"></rect>
-                        <rect x="14" y="12" width="7" height="9"></rect>
-                        <rect x="3" y="16" width="7" height="5"></rect>
-                    </svg>
-                    <span>仪表盘</span>
-                </a>
-                <a href="#" class="nav-item" data-tab="configs">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12.22 2h-.44a2 2 0 0 0-2 2v.18a2 2 0 0 1-3.06 1.87l-.15-.08a2 2 0 0 0-2.73.73l-.43.43a2 2 0 0 0 0 2.82l.09.15a2 2 0 0 1-.25 2.94l-.18.1a2 2 0 0 0 0 3.54l.18.1a2 2 0 0 1 0 2.94l-.09.15a2 2 0 0 0 0 2.82l.43.43a2 2 0 0 0 2.73.73l.15-.08a2 2 0 0 1 3.06 1.87V20a2 2 0 0 0 2 2h.44a2 2 0 0 0 2-2v-.18a2 2 0 0 1 3.06-1.87l.15.08a2 2 0 0 0 2.73-.73l.43-.43a2 2 0 0 0 0-2.82l-.09-.15a2 2 0 0 1 .25-2.94l.18-.1a2 2 0 0 0 0-3.54l-.18-.1a2 2 0 0 1 0-2.94l.09-.15a2 2 0 0 0 0-2.82l-.43-.43a2 2 0 0 0-2.73-.73l-.15.08A2 2 0 0 1 14.22 4.18V4a2 2 0 0 0-2-2z"></path>
-                        <circle cx="12" cy="12" r="3"></circle>
-                    </svg>
-                    <span>配置管理</span>
-                </a>
-                <a href="#" class="nav-item" data-tab="tasks">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path>
-                    </svg>
-                    <span>任务监控</span>
-                </a>
-                <a href="#" class="nav-item" data-tab="progress">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <line x1="12" y1="20" x2="12" y2="10"></line>
-                        <polyline points="6 20 12 10 18 20"></polyline>
-                        <path d="M4 4h16"></path>
-                    </svg>
-                    <span>断点续传</span>
-                </a>
-                <a href="#" class="nav-item" data-tab="realtime">
-                    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <circle cx="12" cy="12" r="10"></circle>
-                        <polyline points="12 6 12 12 16 14"></polyline>
-                        <path d="M12 2a10 10 0 1 0 10 10"></path>
-                    </svg>
-                    <span>实时同步</span>
-                </a>
+                <div class="nav-section">
+                    <span class="nav-section-title">工作台</span>
+                    <a href="#" class="nav-item active" data-tab="dashboard">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="7" height="9" rx="1"></rect>
+                            <rect x="14" y="3" width="7" height="5" rx="1"></rect>
+                            <rect x="14" y="12" width="7" height="9" rx="1"></rect>
+                            <rect x="3" y="16" width="7" height="5" rx="1"></rect>
+                        </svg>
+                        <span>总览仪表盘</span>
+                    </a>
+                    <a href="#" class="nav-item" data-tab="resources">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                        </svg>
+                        <span>资源管理</span>
+                        <span class="nav-badge" id="resourceCount">0</span>
+                    </a>
+                    <a href="#" class="nav-item" data-tab="canvas">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                            <polyline points="21 15 16 10 5 21"></polyline>
+                        </svg>
+                        <span>同步画布</span>
+                        <span class="nav-hint">可视化</span>
+                    </a>
+                </div>
+                
+                <div class="nav-section">
+                    <span class="nav-section-title">同步任务</span>
+                    <a href="#" class="nav-item" data-tab="pipelines">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="18" y1="20" x2="18" y2="10"></line>
+                            <line x1="12" y1="20" x2="12" y2="4"></line>
+                            <line x1="6" y1="20" x2="6" y2="14"></line>
+                        </svg>
+                        <span>同步流水线</span>
+                    </a>
+                    <a href="#" class="nav-item" data-tab="tasks">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <path d="M12 2v4M12 18v4M4.93 4.93l2.83 2.83M16.24 16.24l2.83 2.83M2 12h4M18 12h4M4.93 19.07l2.83-2.83M16.24 7.76l2.83-2.83"></path>
+                        </svg>
+                        <span>任务监控</span>
+                    </a>
+                    <a href="#" class="nav-item" data-tab="realtime">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <circle cx="12" cy="12" r="10"></circle>
+                            <polyline points="12 6 12 12 16 14"></polyline>
+                            <path d="M12 2a10 10 0 1 0 10 10"></path>
+                        </svg>
+                        <span>实时同步</span>
+                    </a>
+                </div>
+                
+                <div class="nav-section">
+                    <span class="nav-section-title">系统</span>
+                    <a href="#" class="nav-item" data-tab="progress">
+                        <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="20" x2="12" y2="10"></line>
+                            <polyline points="6 20 12 10 18 20"></polyline>
+                            <path d="M4 4h16"></path>
+                        </svg>
+                        <span>断点续传</span>
+                    </a>
+                </div>
             </nav>
             
             <div class="sidebar-footer">
-                <div class="user-info">
+                <div class="user-profile">
                     <div class="user-avatar">{{ username[0].upper() }}</div>
-                    <div class="user-details">
+                    <div class="user-info">
                         <span class="username">{{ username }}</span>
-                        <span class="role">管理员</span>
+                        <span class="user-role">系统管理员</span>
                     </div>
                 </div>
                 <a href="{{ url_for('logout') }}" class="logout-btn" title="退出登录">
@@ -85,128 +119,317 @@
         <main class="main-content">
             <header class="topbar">
                 <div class="page-title">
-                    <h1 id="pageTitle">仪表盘</h1>
-                    <p id="pageSubtitle">查看同步系统概览</p>
+                    <h1 id="pageTitle">总览仪表盘</h1>
+                    <p id="pageSubtitle">查看数据同步平台的整体运行状态</p>
                 </div>
                 <div class="topbar-actions">
-                    <div class="db-badge">
-                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
-                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
-                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
-                        </svg>
-                        <span>DB2 (内存)</span>
+                    <div class="status-indicator">
+                        <span class="status-dot"></span>
+                        <span>系统运行正常</span>
                     </div>
+                    <button class="btn-primary btn-sm" onclick="showQuickStart()">
+                        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                            <line x1="12" y1="5" x2="12" y2="19"></line>
+                            <line x1="5" y1="12" x2="19" y2="12"></line>
+                        </svg>
+                        快速开始
+                    </button>
                 </div>
             </header>
             
             <div class="content-area">
                 <section id="tab-dashboard" class="tab-content active">
                     <div class="stats-grid">
-                        <div class="stat-card">
-                            <div class="stat-icon bg-blue">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
+                        <div class="stat-card stat-card-gradient stat-gradient-1">
+                            <div class="stat-icon-wrap">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
                                 </svg>
                             </div>
                             <div class="stat-content">
-                                <p class="stat-label">总任务数</p>
-                                <h3 class="stat-value" id="statTotalTasks">0</h3>
+                                <p class="stat-label">数据源</p>
+                                <h3 class="stat-value" id="statResources">0</h3>
+                                <span class="stat-trend positive">+0 本月</span>
                             </div>
                         </div>
-                        <div class="stat-card">
-                            <div class="stat-icon bg-green">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <div class="stat-card stat-card-gradient stat-gradient-2">
+                            <div class="stat-icon-wrap">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <line x1="18" y1="20" x2="18" y2="10"></line>
+                                    <line x1="12" y1="20" x2="12" y2="4"></line>
+                                    <line x1="6" y1="20" x2="6" y2="14"></line>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <p class="stat-label">同步流水线</p>
+                                <h3 class="stat-value" id="statPipelines">0</h3>
+                                <span class="stat-trend positive">+0 本月</span>
+                            </div>
+                        </div>
+                        <div class="stat-card stat-card-gradient stat-gradient-3">
+                            <div class="stat-icon-wrap">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"></path>
+                                    <polyline points="22 4 12 14.01 9 11.01"></polyline>
+                                </svg>
+                            </div>
+                            <div class="stat-content">
+                                <p class="stat-label">运行中任务</p>
+                                <h3 class="stat-value" id="statRunning">0</h3>
+                                <span class="stat-trend neutral">实时监控中</span>
+                            </div>
+                        </div>
+                        <div class="stat-card stat-card-gradient stat-gradient-4">
+                            <div class="stat-icon-wrap">
+                                <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
                                     <polyline points="20 6 9 17 4 12"></polyline>
                                 </svg>
                             </div>
                             <div class="stat-content">
-                                <p class="stat-label">已完成</p>
-                                <h3 class="stat-value" id="statCompleted">0</h3>
-                            </div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-icon bg-orange">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"></polygon>
-                                </svg>
-                            </div>
-                            <div class="stat-content">
-                                <p class="stat-label">运行中</p>
-                                <h3 class="stat-value" id="statRunning">0</h3>
-                            </div>
-                        </div>
-                        <div class="stat-card">
-                            <div class="stat-icon bg-red">
-                                <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <line x1="15" y1="9" x2="9" y2="15"></line>
-                                    <line x1="9" y1="9" x2="15" y2="15"></line>
-                                </svg>
-                            </div>
-                            <div class="stat-content">
-                                <p class="stat-label">失败</p>
-                                <h3 class="stat-value" id="statFailed">0</h3>
+                                <p class="stat-label">已同步数据</p>
+                                <h3 class="stat-value" id="statSyncedRows">0</h3>
+                                <span class="stat-trend positive">累计</span>
                             </div>
                         </div>
                     </div>
                     
                     <div class="dashboard-grid">
-                        <div class="card">
-                        <div class="card-header">
-                            <h3>同步进度总览</h3>
-                        </div>
-                        <div class="card-body">
-                            <div class="progress-overview">
-                                <div class="progress-ring-container">
-                                    <div class="progress-ring">
-                                        <svg width="120" height="120" viewBox="0 0 120 120">
-                                            <circle class="progress-ring-bg" cx="60" cy="60" r="50" stroke-width="10"></circle>
-                                            <circle class="progress-ring-fg" id="overallProgressCircle" cx="60" cy="60" r="50" stroke-width="10" stroke-dasharray="314" stroke-dashoffset="314"></circle>
-                                        </svg>
-                                        <div class="progress-ring-text">
-                                            <span id="overallPercentage">0%</span>
-                                            <small>总体进度</small>
+                        <div class="card card-hover">
+                            <div class="card-header">
+                                <h3>快速入门向导</h3>
+                                <span class="card-badge">新手引导</span>
+                            </div>
+                            <div class="card-body">
+                                <div class="onboarding-steps">
+                                    <div class="onboarding-step completed" data-step="1">
+                                        <div class="step-icon">✓</div>
+                                        <div class="step-content">
+                                            <h4>创建数据源</h4>
+                                            <p>添加源数据库和目标数据库连接</p>
                                         </div>
+                                        <button class="btn-link" onclick="switchTab('resources')">前往</button>
+                                    </div>
+                                    <div class="onboarding-step" data-step="2">
+                                        <div class="step-icon">2</div>
+                                        <div class="step-content">
+                                            <h4>配置同步关系</h4>
+                                            <p>在画布中拖拽建立表映射关系</p>
+                                        </div>
+                                        <button class="btn-link" onclick="switchTab('canvas')">前往</button>
+                                    </div>
+                                    <div class="onboarding-step" data-step="3">
+                                        <div class="step-icon">3</div>
+                                        <div class="step-content">
+                                            <h4>启动同步任务</h4>
+                                            <p>运行并监控数据同步过程</p>
+                                        </div>
+                                        <button class="btn-link" onclick="switchTab('pipelines')">前往</button>
                                     </div>
                                 </div>
-                                <div class="progress-stats">
-                                    <div class="progress-stat-item">
-                                        <span class="label">同步表数</span>
-                                        <span class="value"><span id="statCompletedTables">0</span> / <span id="statTotalTables">0</span></span>
+                            </div>
+                        </div>
+                        
+                        <div class="card card-hover">
+                            <div class="card-header">
+                                <h3>同步进度概览</h3>
+                                <button class="btn-link" onclick="switchTab('tasks')">查看全部</button>
+                            </div>
+                            <div class="card-body">
+                                <div class="progress-overview">
+                                    <div class="progress-ring-container">
+                                        <div class="progress-ring">
+                                            <svg width="140" height="140" viewBox="0 0 120 120">
+                                                <circle class="progress-ring-bg" cx="60" cy="60" r="50" stroke-width="8"></circle>
+                                                <circle class="progress-ring-fg" id="overallProgressCircle" cx="60" cy="60" r="50" stroke-width="8" stroke-dasharray="314" stroke-dashoffset="314"></circle>
+                                            </svg>
+                                            <div class="progress-ring-text">
+                                                <span id="overallPercentage">0%</span>
+                                                <small>总体进度</small>
+                                            </div>
+                                        </div>
                                     </div>
-                                    <div class="progress-stat-item">
-                                        <span class="label">总行数</span>
-                                        <span class="value"><span id="statSyncedRows">0</span> / <span id="statTotalRows">0</span></span>
+                                    <div class="progress-stats">
+                                        <div class="progress-stat-item">
+                                            <span class="label">同步表数</span>
+                                            <span class="value"><span id="statCompletedTables">0</span> / <span id="statTotalTables">0</span></span>
+                                        </div>
+                                        <div class="progress-stat-item">
+                                            <span class="label">总行数</span>
+                                            <span class="value"><span id="statSyncedRows2">0</span> / <span id="statTotalRows">0</span></span>
+                                        </div>
+                                        <div class="progress-stat-item">
+                                            <span class="label">成功率</span>
+                                            <span class="value success">98.5%</span>
+                                        </div>
                                     </div>
                                 </div>
                             </div>
                         </div>
                     </div>
                     
-                    <div class="card">
+                    <div class="card card-hover">
                         <div class="card-header">
-                            <h3>最近任务</h3>
-                            <button class="btn-link" onclick="loadTasks()">查看全部</button>
+                            <h3>最近活动</h3>
+                            <button class="btn-link" onclick="switchTab('tasks')">查看全部</button>
                         </div>
                         <div class="card-body">
-                            <div id="recentTasksList" class="task-list-mini">
+                            <div id="recentActivityList" class="activity-list">
                             </div>
                         </div>
-                    </div>
                     </div>
                 </section>
                 
-                <section id="tab-configs" class="tab-content">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>同步配置</h3>
-                            <button class="btn-primary" onclick="showConfigModal()">新建配置</button>
+                <section id="tab-resources" class="tab-content">
+                    <div class="page-header">
+                        <div>
+                            <h2>资源管理</h2>
+                            <p>管理所有数据库连接资源，作为同步任务的基础</p>
                         </div>
-                        <div class="card-body">
-                            <div id="configsList" class="configs-list">
+                        <button class="btn-primary" onclick="showResourceModal()">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                <line x1="12" y1="5" x2="12" y2="19"></line>
+                                <line x1="5" y1="12" x2="19" y2="12"></line>
+                            </svg>
+                            添加资源
+                        </button>
+                    </div>
+                    
+                    <div class="resource-grid" id="resourceGrid">
+                    </div>
+                </section>
+                
+                <section id="tab-canvas" class="tab-content">
+                    <div class="canvas-container">
+                        <div class="canvas-toolbar">
+                            <div class="toolbar-left">
+                                <h3>同步关系画布</h3>
+                                <span class="toolbar-hint">拖拽左侧资源到画布，连接节点建立同步关系</span>
+                            </div>
+                            <div class="toolbar-right">
+                                <button class="btn-secondary btn-sm" onclick="clearCanvas()">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <polyline points="3 6 5 6 21 6"></polyline>
+                                        <path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path>
+                                    </svg>
+                                    清空画布
+                                </button>
+                                <button class="btn-secondary btn-sm" onclick="autoLayout()">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <rect x="3" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="3" width="7" height="7"></rect>
+                                        <rect x="14" y="14" width="7" height="7"></rect>
+                                        <rect x="3" y="14" width="7" height="7"></rect>
+                                    </svg>
+                                    自动布局
+                                </button>
+                                <button class="btn-primary btn-sm" onclick="savePipeline()">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"></path>
+                                        <polyline points="17 21 17 13 7 13 7 21"></polyline>
+                                        <polyline points="7 3 7 8 15 8"></polyline>
+                                    </svg>
+                                    保存流水线
+                                </button>
                             </div>
                         </div>
+                        
+                        <div class="canvas-body">
+                            <div class="canvas-sidebar">
+                                <div class="canvas-sidebar-title">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                    </svg>
+                                    可用资源
+                                </div>
+                                <div class="resource-palette" id="resourcePalette">
+                                </div>
+                                <div class="canvas-sidebar-title" style="margin-top: 16px;">
+                                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                        <circle cx="12" cy="12" r="3"></circle>
+                                        <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                    </svg>
+                                    操作提示
+                                </div>
+                                <div class="canvas-tips">
+                                    <div class="tip-item">
+                                        <span class="tip-icon">📌</span>
+                                        <span>拖拽资源到画布创建节点</span>
+                                    </div>
+                                    <div class="tip-item">
+                                        <span class="tip-icon">🔗</span>
+                                        <span>从输出端口拖到输入端口建立连接</span>
+                                    </div>
+                                    <div class="tip-item">
+                                        <span class="tip-icon">⚙️</span>
+                                        <span>双击节点配置同步规则</span>
+                                    </div>
+                                    <div class="tip-item">
+                                        <span class="tip-icon">🗑️</span>
+                                        <span>选中节点按 Delete 删除</span>
+                                    </div>
+                                </div>
+                            </div>
+                            
+                            <div class="canvas-area" id="canvasArea">
+                                <svg class="canvas-connections" id="canvasConnections"></svg>
+                                <div class="canvas-nodes" id="canvasNodes"></div>
+                                <div class="canvas-empty" id="canvasEmpty">
+                                    <div class="empty-icon">
+                                        <svg width="64" height="64" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                            <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                                            <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                            <polyline points="21 15 16 10 5 21"></polyline>
+                                        </svg>
+                                    </div>
+                                    <h3>开始创建你的同步流水线</h3>
+                                    <p>从左侧拖拽数据库资源到画布，建立源到目标的同步关系</p>
+                                    <button class="btn-primary" onclick="switchTab('resources')">
+                                        先添加数据源
+                                    </button>
+                                </div>
+                            </div>
+                            
+                            <div class="canvas-inspector" id="canvasInspector">
+                                <div class="inspector-header">
+                                    <h4>属性面板</h4>
+                                </div>
+                                <div class="inspector-body" id="inspectorBody">
+                                    <div class="inspector-empty">
+                                        <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                                            <circle cx="12" cy="12" r="3"></circle>
+                                            <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                                        </svg>
+                                        <p>选中节点查看属性</p>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </section>
+                
+                <section id="tab-pipelines" class="tab-content">
+                    <div class="page-header">
+                        <div>
+                            <h2>同步流水线</h2>
+                            <p>管理所有已配置的同步流水线</p>
+                        </div>
+                        <div class="header-actions">
+                            <button class="btn-secondary" onclick="switchTab('canvas')">
+                                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <rect x="3" y="3" width="18" height="18" rx="2"></rect>
+                                    <circle cx="8.5" cy="8.5" r="1.5"></circle>
+                                    <polyline points="21 15 16 10 5 21"></polyline>
+                                </svg>
+                                打开画布
+                            </button>
+                        </div>
+                    </div>
+                    
+                    <div class="pipeline-list" id="pipelineList">
                     </div>
                 </section>
                 
@@ -223,27 +446,6 @@
                     </div>
                 </section>
                 
-                <section id="tab-progress" class="tab-content">
-                    <div class="card">
-                        <div class="card-header">
-                            <h3>断点续传管理</h3>
-                            <button class="btn-danger" onclick="resetAllProgress()">重置所有进度</button>
-                        </div>
-                        <div class="card-body">
-                            <div class="alert-info">
-                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
-                                    <circle cx="12" cy="12" r="10"></circle>
-                                    <line x1="12" y1="16" x2="12" y2="12"></line>
-                                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
-                                </svg>
-                                <p>断点数据存储在DB2内存数据库中。系统崩溃或中断后，可从断点处继续同步。</p>
-                            </div>
-                            <div id="progressList" class="progress-list">
-                            </div>
-                        </div>
-                    </div>
-                </section>
-
                 <section id="tab-realtime" class="tab-content">
                     <div class="card">
                         <div class="card-header">
@@ -311,123 +513,132 @@
                         </div>
                     </div>
                 </section>
+                
+                <section id="tab-progress" class="tab-content">
+                    <div class="card">
+                        <div class="card-header">
+                            <h3>断点续传管理</h3>
+                            <button class="btn-danger" onclick="resetAllProgress()">重置所有进度</button>
+                        </div>
+                        <div class="card-body">
+                            <div class="alert-info">
+                                <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                    <circle cx="12" cy="12" r="10"></circle>
+                                    <line x1="12" y1="16" x2="12" y2="12"></line>
+                                    <line x1="12" y1="8" x2="12.01" y2="8"></line>
+                                </svg>
+                                <p>断点数据存储在DB2内存数据库中。系统崩溃或中断后，可从断点处继续同步。</p>
+                            </div>
+                            <div id="progressList" class="progress-list">
+                            </div>
+                        </div>
+                    </div>
+                </section>
             </div>
         </main>
     </div>
     
-    <div id="configModal" class="modal">
-        <div class="modal-content">
+    <div id="resourceModal" class="modal">
+        <div class="modal-content modal-lg">
             <div class="modal-header">
-                <h3 id="configModalTitle">新建配置</h3>
-                <button class="modal-close" onclick="closeConfigModal()">&times;</button>
+                <h3 id="resourceModalTitle">添加数据库资源</h3>
+                <button class="modal-close" onclick="closeResourceModal()">&times;</button>
             </div>
             <div class="modal-body">
-                <form id="configForm" onsubmit="return false">
+                <form id="resourceForm" onsubmit="return false">
                     <div class="form-group">
-                        <label>配置名称</label>
-                        <input type="text" id="configName" required placeholder="例如：生产环境同步">
+                        <label>资源名称</label>
+                        <input type="text" id="resourceName" required placeholder="例如：生产环境MySQL">
                     </div>
                     
-                    <div class="config-tabs">
-                        <div class="config-tab active" data-section="source">源数据库</div>
-                        <div class="config-tab" data-section="target">目标数据库</div>
-                        <div class="config-tab" data-section="sync">同步设置</div>
-                    </div>
-                    
-                    <div class="config-section active" id="section-source">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label>数据库类型</label>
-                                <select id="sourceType" onchange="onDbTypeChange('source')">
-                                    <option value="mysql">MySQL</option>
-                                    <option value="db2">DB2</option>
-                                    <option value="oracle">Oracle</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>主机地址</label>
-                                <input type="text" id="sourceHost" placeholder="192.168.1.100">
-                            </div>
-                            <div class="form-group">
-                                <label>端口</label>
-                                <input type="number" id="sourcePort" value="3306">
-                            </div>
-                            <div class="form-group">
-                                <label>用户名</label>
-                                <input type="text" id="sourceUser" placeholder="root">
-                            </div>
-                            <div class="form-group">
-                                <label>密码</label>
-                                <input type="password" id="sourcePassword" placeholder="密码">
-                            </div>
-                            <div class="form-group full-width">
-                                <label>数据库名</label>
-                                <input type="text" id="sourceDatabase" placeholder="source_db">
-                            </div>
+                    <div class="form-group">
+                        <label>数据库类型</label>
+                        <div class="db-type-selector">
+                            <label class="db-type-option selected" data-type="mysql">
+                                <input type="radio" name="dbType" value="mysql" checked>
+                                <div class="db-type-card">
+                                    <div class="db-icon mysql">
+                                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                        </svg>
+                                    </div>
+                                    <span>MySQL</span>
+                                </div>
+                            </label>
+                            <label class="db-type-option" data-type="db2">
+                                <input type="radio" name="dbType" value="db2">
+                                <div class="db-type-card">
+                                    <div class="db-icon db2">
+                                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                        </svg>
+                                    </div>
+                                    <span>DB2</span>
+                                </div>
+                            </label>
+                            <label class="db-type-option" data-type="oracle">
+                                <input type="radio" name="dbType" value="oracle">
+                                <div class="db-type-card">
+                                    <div class="db-icon oracle">
+                                        <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                                            <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                                            <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                                            <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                                        </svg>
+                                    </div>
+                                    <span>Oracle</span>
+                                </div>
+                            </label>
                         </div>
                     </div>
                     
-                    <div class="config-section" id="section-target">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label>数据库类型</label>
-                                <select id="targetType" onchange="onDbTypeChange('target')">
-                                    <option value="mysql">MySQL</option>
-                                    <option value="db2">DB2</option>
-                                    <option value="oracle">Oracle</option>
-                                </select>
-                            </div>
-                            <div class="form-group">
-                                <label>主机地址</label>
-                                <input type="text" id="targetHost" placeholder="127.0.0.1">
-                            </div>
-                            <div class="form-group">
-                                <label>端口</label>
-                                <input type="number" id="targetPort" value="3306">
-                            </div>
-                            <div class="form-group">
-                                <label>用户名</label>
-                                <input type="text" id="targetUser" placeholder="root">
-                            </div>
-                            <div class="form-group">
-                                <label>密码</label>
-                                <input type="password" id="targetPassword" placeholder="密码">
-                            </div>
-                            <div class="form-group full-width">
-                                <label>数据库名</label>
-                                <input type="text" id="targetDatabase" placeholder="target_db">
-                            </div>
+                    <div class="form-grid">
+                        <div class="form-group">
+                            <label>主机地址</label>
+                            <input type="text" id="resourceHost" placeholder="192.168.1.100">
                         </div>
-                    </div>
-                    
-                    <div class="config-section" id="section-sync">
-                        <div class="form-grid">
-                            <div class="form-group">
-                                <label>并行表数</label>
-                                <input type="number" id="syncParallel" value="4" min="1" max="16">
-                            </div>
-                            <div class="form-group">
-                                <label>分块大小</label>
-                                <input type="number" id="syncChunkSize" value="50000">
-                            </div>
-                            <div class="form-group">
-                                <label>批量插入大小</label>
-                                <input type="number" id="syncBatchSize" value="5000">
-                            </div>
-                            <div class="form-group full-width">
-                                <label>同步表列表（逗号分隔，留空同步所有）</label>
-                                <input type="text" id="syncTables" placeholder="table_a, table_b, table_c">
-                                <button type="button" class="btn-link" id="loadTablesBtn" onclick="loadSourceTables()" style="margin-top: 8px;">从源数据库加载表列表</button>
-                                <div id="tablesCheckboxes" style="margin-top: 10px; display: none;"></div>
-                            </div>
+                        <div class="form-group">
+                            <label>端口</label>
+                            <input type="number" id="resourcePort" value="3306">
+                        </div>
+                        <div class="form-group">
+                            <label>用户名</label>
+                            <input type="text" id="resourceUser" placeholder="root">
+                        </div>
+                        <div class="form-group">
+                            <label>密码</label>
+                            <input type="password" id="resourcePassword" placeholder="密码">
+                        </div>
+                        <div class="form-group full-width">
+                            <label>数据库名</label>
+                            <input type="text" id="resourceDatabase" placeholder="database_name">
                         </div>
                     </div>
                 </form>
             </div>
             <div class="modal-footer">
-                <button type="button" class="btn-secondary" onclick="closeConfigModal()">取消</button>
-                <button type="button" class="btn-secondary" onclick="testConnection()">测试连接</button>
-                <button type="button" class="btn-primary" onclick="saveConfig()">保存配置</button>
+                <button type="button" class="btn-secondary" onclick="closeResourceModal()">取消</button>
+                <button type="button" class="btn-secondary" onclick="testResourceConnection()">测试连接</button>
+                <button type="button" class="btn-primary" onclick="saveResource()">保存资源</button>
+            </div>
+        </div>
+    </div>
+    
+    <div id="nodeConfigModal" class="modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 id="nodeConfigTitle">节点配置</h3>
+                <button class="modal-close" onclick="closeNodeConfigModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="nodeConfigBody">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeNodeConfigModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="saveNodeConfig()">保存配置</button>
             </div>
         </div>
     </div>
@@ -548,8 +759,45 @@
         </div>
     </div>
     
+    <div id="quickStartModal" class="modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3>🚀 快速开始</h3>
+                <button class="modal-close" onclick="closeQuickStartModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="quick-start-guide">
+                    <div class="guide-step">
+                        <div class="step-number">1</div>
+                        <div class="step-content">
+                            <h4>添加数据源</h4>
+                            <p>在资源管理中添加源数据库和目标数据库</p>
+                            <button class="btn-primary btn-sm" onclick="closeQuickStartModal(); switchTab('resources');">去添加</button>
+                        </div>
+                    </div>
+                    <div class="guide-step">
+                        <div class="step-number">2</div>
+                        <div class="step-content">
+                            <h4>配置同步关系</h4>
+                            <p>在同步画布中拖拽资源，建立源到目标的映射</p>
+                            <button class="btn-primary btn-sm" onclick="closeQuickStartModal(); switchTab('canvas');">去配置</button>
+                        </div>
+                    </div>
+                    <div class="guide-step">
+                        <div class="step-number">3</div>
+                        <div class="step-content">
+                            <h4>启动同步</h4>
+                            <p>保存流水线并启动同步任务</p>
+                            <button class="btn-primary btn-sm" onclick="closeQuickStartModal(); switchTab('pipelines');">去启动</button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+    
     <div id="toast" class="toast"></div>
     
-    <script src="{{ url_for('static', filename='js/app.js') }}?v=2"></script>
+    <script src="{{ url_for('static', filename='js/app.js') }}?v=3"></script>
 </body>
 </html>

@@ -19,8 +19,10 @@ const DB_TYPE_LABELS = {
 };
 
 const pageTitles = {
-    dashboard: { title: '仪表盘', subtitle: '查看同步系统概览' },
-    configs: { title: '配置管理', subtitle: '管理数据库同步配置' },
+    dashboard: { title: '总览仪表盘', subtitle: '查看数据同步平台的整体运行状态' },
+    resources: { title: '资源管理', subtitle: '管理所有数据库连接资源，作为同步任务的基础' },
+    canvas: { title: '同步画布', subtitle: '可视化拖拽建立同步关系' },
+    pipelines: { title: '同步流水线', subtitle: '管理所有已配置的同步流水线' },
     tasks: { title: '任务监控', subtitle: '监控和管理同步任务' },
     progress: { title: '断点续传', subtitle: '管理同步断点和进度' },
     realtime: { title: '实时同步', subtitle: '管理实时 CDC 数据同步' }
@@ -51,7 +53,8 @@ function switchTab(tab) {
     document.querySelectorAll('.tab-content').forEach(content => {
         content.classList.remove('active');
     });
-    document.getElementById(`tab-${tab}`).classList.add('active');
+    const tabEl = document.getElementById(`tab-${tab}`);
+    if (tabEl) tabEl.classList.add('active');
 
     const title = pageTitles[tab];
     if (title) {
@@ -66,6 +69,9 @@ function switchTab(tab) {
     if (tab === 'progress') loadProgress();
     if (tab === 'dashboard') loadDashboard();
     if (tab === 'realtime') loadRealtimeTasks();
+    if (tab === 'resources') loadResources();
+    if (tab === 'canvas') loadCanvas();
+    if (tab === 'pipelines') loadPipelines();
 }
 
 function initConfigTabs() {
@@ -1350,4 +1356,1005 @@ function closeRealtimeDetailModal() {
         realtimePollingInterval = null;
     }
     currentRealtimeTaskId = null;
+}
+
+// ====================================================================== //
+//                           资源管理功能
+// ====================================================================== //
+
+let currentResourceId = null;
+
+async function loadResources() {
+    const data = await apiRequest('/api/resources');
+    if (!data || !data.success) return;
+
+    const resources = data.resources || [];
+    const container = document.getElementById('resourceGrid');
+    const countEl = document.getElementById('resourceCount');
+    
+    if (countEl) countEl.textContent = resources.length;
+
+    if (resources.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state" style="grid-column: 1 / -1;">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                </svg>
+                <h4>暂无资源</h4>
+                <p>添加您的第一个数据库资源开始使用</p>
+                <button class="btn-primary" onclick="showResourceModal()">添加资源</button>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = resources.map(resource => `
+        <div class="resource-card" data-resource-id="${resource.resource_id}">
+            <div class="resource-card-header">
+                <div class="resource-icon ${resource.type}">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                    </svg>
+                </div>
+                <div class="resource-info">
+                    <h4>${resource.name}</h4>
+                    <span class="resource-type">${DB_TYPE_LABELS[resource.type] || resource.type}</span>
+                </div>
+            </div>
+            <div class="resource-card-body">
+                <div class="resource-detail-item">
+                    <span class="label">主机</span>
+                    <span class="value">${resource.host}:${resource.port}</span>
+                </div>
+                <div class="resource-detail-item">
+                    <span class="label">数据库</span>
+                    <span class="value">${resource.database}</span>
+                </div>
+                <div class="resource-detail-item">
+                    <span class="label">用户</span>
+                    <span class="value">${resource.user}</span>
+                </div>
+            </div>
+            <div class="resource-card-footer">
+                <button class="btn-secondary btn-sm" onclick="testResourceConnection('${resource.resource_id}')">测试连接</button>
+                <button class="btn-secondary btn-sm" onclick="editResource('${resource.resource_id}')">编辑</button>
+                <button class="btn-danger btn-sm" onclick="deleteResource('${resource.resource_id}')">删除</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function showResourceModal(resourceId = null) {
+    currentResourceId = resourceId;
+    const modal = document.getElementById('resourceModal');
+    const title = document.getElementById('resourceModalTitle');
+    const form = document.getElementById('resourceForm');
+    
+    form.reset();
+    document.querySelectorAll('.db-type-option').forEach(opt => opt.classList.remove('selected'));
+    document.querySelector('.db-type-option[data-type="mysql"]').classList.add('selected');
+    document.querySelector('input[name="dbType"][value="mysql"]').checked = true;
+    document.getElementById('resourcePort').value = 3306;
+
+    if (resourceId) {
+        title.textContent = '编辑数据库资源';
+        loadResourceForEdit(resourceId);
+    } else {
+        title.textContent = '添加数据库资源';
+        document.getElementById('resourceName').value = '';
+        document.getElementById('resourceHost').value = '';
+        document.getElementById('resourceUser').value = '';
+        document.getElementById('resourcePassword').value = '';
+        document.getElementById('resourceDatabase').value = '';
+    }
+    
+    modal.classList.add('active');
+}
+
+function closeResourceModal() {
+    document.getElementById('resourceModal').classList.remove('active');
+    currentResourceId = null;
+}
+
+async function loadResourceForEdit(resourceId) {
+    const data = await apiRequest(`/api/resources/${resourceId}`);
+    if (!data || !data.success) return;
+
+    const resource = data.resource;
+    document.getElementById('resourceName').value = resource.name;
+    document.getElementById('resourceHost').value = resource.host;
+    document.getElementById('resourcePort').value = resource.port;
+    document.getElementById('resourceUser').value = resource.user;
+    document.getElementById('resourcePassword').value = resource.password;
+    document.getElementById('resourceDatabase').value = resource.database;
+
+    document.querySelectorAll('.db-type-option').forEach(opt => {
+        opt.classList.toggle('selected', opt.dataset.type === resource.type);
+    });
+    const radio = document.querySelector(`input[name="dbType"][value="${resource.type}"]`);
+    if (radio) radio.checked = true;
+}
+
+document.addEventListener('click', function(e) {
+    const dbTypeOption = e.target.closest('.db-type-option');
+    if (dbTypeOption) {
+        document.querySelectorAll('.db-type-option').forEach(opt => opt.classList.remove('selected'));
+        dbTypeOption.classList.add('selected');
+        const type = dbTypeOption.dataset.type;
+        const radio = dbTypeOption.querySelector('input[type="radio"]');
+        if (radio) radio.checked = true;
+        document.getElementById('resourcePort').value = DB_DEFAULT_PORTS[type] || 3306;
+    }
+});
+
+async function saveResource() {
+    const name = document.getElementById('resourceName').value.trim();
+    if (!name) {
+        showToast('请输入资源名称', 'error');
+        return;
+    }
+
+    const type = document.querySelector('input[name="dbType"]:checked')?.value || 'mysql';
+    const resource = {
+        name: name,
+        type: type,
+        host: document.getElementById('resourceHost').value.trim(),
+        port: parseInt(document.getElementById('resourcePort').value) || 3306,
+        user: document.getElementById('resourceUser').value.trim(),
+        password: document.getElementById('resourcePassword').value,
+        database: document.getElementById('resourceDatabase').value.trim(),
+    };
+
+    const requiredFields = [
+        ['host', '主机地址'],
+        ['user', '用户名'],
+        ['database', '数据库名'],
+    ];
+
+    for (const [field, label] of requiredFields) {
+        if (!resource[field]) {
+            showToast(`请填写${label}`, 'error');
+            return;
+        }
+    }
+
+    try {
+        let data;
+        if (currentResourceId) {
+            data = await apiRequest(`/api/resources/${currentResourceId}`, 'PUT', resource);
+        } else {
+            data = await apiRequest('/api/resources', 'POST', resource);
+        }
+
+        if (data && data.success) {
+            showToast(currentResourceId ? '资源更新成功' : '资源创建成功', 'success');
+            closeResourceModal();
+            loadResources();
+        } else {
+            showToast(data?.message || '保存失败', 'error');
+        }
+    } catch (error) {
+        showToast('保存资源时出错: ' + error.message, 'error');
+    }
+}
+
+async function testResourceConnection(resourceId) {
+    if (!resourceId) {
+        const name = document.getElementById('resourceName').value.trim();
+        if (!name) {
+            showToast('请先输入资源名称', 'error');
+            return;
+        }
+        showToast('请先保存资源后再测试连接', 'info');
+        return;
+    }
+
+    showToast('正在测试连接...', 'info');
+    const data = await apiRequest(`/api/resources/${resourceId}/test`, 'POST');
+    if (data && data.success) {
+        showToast('连接测试通过', 'success');
+    } else {
+        showToast(data?.message || '连接测试失败', 'error');
+    }
+}
+
+async function editResource(resourceId) {
+    showResourceModal(resourceId);
+}
+
+async function deleteResource(resourceId) {
+    if (!confirm('确定要删除此资源吗？删除后将无法恢复。')) return;
+
+    const data = await apiRequest(`/api/resources/${resourceId}`, 'DELETE');
+    if (data && data.success) {
+        showToast('资源删除成功', 'success');
+        loadResources();
+    }
+}
+
+// ====================================================================== //
+//                           画布编辑器功能
+// ====================================================================== //
+
+let canvasNodes = [];
+let canvasConnections = [];
+let selectedNode = null;
+let isDragging = false;
+let isConnecting = false;
+let connectingFrom = null;
+let tempConnectionLine = null;
+let dragOffset = { x: 0, y: 0 };
+let nodeIdCounter = 0;
+
+function loadCanvas() {
+    loadResourcePalette();
+    renderCanvas();
+    initCanvasEvents();
+}
+
+async function loadResourcePalette() {
+    const data = await apiRequest('/api/resources');
+    const container = document.getElementById('resourcePalette');
+    
+    if (!data || !data.success || data.resources.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state-small">
+                <p>暂无可用资源</p>
+                <button class="btn-link" onclick="switchTab('resources')">去添加</button>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = data.resources.map(resource => `
+        <div class="palette-item" draggable="true" data-resource-id="${resource.resource_id}" data-resource-type="${resource.type}" data-resource-name="${resource.name}">
+            <div class="palette-item-icon ${resource.type}">
+                <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                    <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                    <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                </svg>
+            </div>
+            <div class="palette-item-info">
+                <span class="palette-item-name">${resource.name}</span>
+                <span class="palette-item-type">${DB_TYPE_LABELS[resource.type] || resource.type}</span>
+            </div>
+        </div>
+    `).join('');
+
+    initPaletteDrag();
+}
+
+function initPaletteDrag() {
+    document.querySelectorAll('.palette-item').forEach(item => {
+        item.addEventListener('dragstart', function(e) {
+            e.dataTransfer.setData('resourceId', this.dataset.resourceId);
+            e.dataTransfer.setData('resourceType', this.dataset.resourceType);
+            e.dataTransfer.setData('resourceName', this.dataset.resourceName);
+        });
+    });
+}
+
+function initCanvasEvents() {
+    const canvasArea = document.getElementById('canvasArea');
+    
+    canvasArea.addEventListener('dragover', function(e) {
+        e.preventDefault();
+        this.classList.add('drag-over');
+    });
+
+    canvasArea.addEventListener('dragleave', function(e) {
+        if (!this.contains(e.relatedTarget)) {
+            this.classList.remove('drag-over');
+        }
+    });
+
+    canvasArea.addEventListener('drop', function(e) {
+        e.preventDefault();
+        this.classList.remove('drag-over');
+        
+        const resourceId = e.dataTransfer.getData('resourceId');
+        const resourceType = e.dataTransfer.getData('resourceType');
+        const resourceName = e.dataTransfer.getData('resourceName');
+        
+        if (resourceId) {
+            const rect = this.getBoundingClientRect();
+            const x = e.clientX - rect.left - 100;
+            const y = e.clientY - rect.top - 40;
+            addCanvasNode(resourceId, resourceType, resourceName, x, y);
+        }
+    });
+
+    canvasArea.addEventListener('click', function(e) {
+        if (e.target === this || e.target.classList.contains('canvas-connections') || e.target.classList.contains('canvas-nodes')) {
+            selectNode(null);
+        }
+    });
+
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'Delete' && selectedNode && currentTab === 'canvas') {
+            deleteCanvasNode(selectedNode.id);
+        }
+    });
+}
+
+function addCanvasNode(resourceId, resourceType, resourceName, x, y) {
+    nodeIdCounter++;
+    const nodeId = `node_${nodeIdCounter}`;
+    const node = {
+        id: nodeId,
+        resourceId: resourceId,
+        type: resourceType,
+        name: resourceName,
+        x: Math.max(0, x),
+        y: Math.max(0, y),
+        nodeType: 'source',
+        tables: [],
+    };
+    canvasNodes.push(node);
+    renderCanvas();
+    selectNode(nodeId);
+    updateCanvasEmptyState();
+}
+
+function renderCanvas() {
+    const nodesContainer = document.getElementById('canvasNodes');
+    const connectionsContainer = document.getElementById('canvasConnections');
+
+    nodesContainer.innerHTML = canvasNodes.map(node => `
+        <div class="canvas-node ${selectedNode === node.id ? 'selected' : ''}" 
+             data-node-id="${node.id}"
+             style="left: ${node.x}px; top: ${node.y}px;">
+            <div class="canvas-node-header">
+                <div class="canvas-node-icon ${node.type}">
+                    <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+                        <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+                        <path d="M3 5v14c0 1.66 4 3 9 3s9-1.34 9-3V5"></path>
+                    </svg>
+                </div>
+                <span class="canvas-node-title">${node.name}</span>
+                <span class="canvas-node-type-badge">${node.nodeType === 'source' ? '源' : '目标'}</span>
+            </div>
+            <div class="canvas-node-body">
+                <span class="canvas-node-db">${DB_TYPE_LABELS[node.type] || node.type}</span>
+                ${node.tables.length > 0 ? `<span class="canvas-node-tables">${node.tables.length} 张表</span>` : ''}
+            </div>
+            <div class="canvas-node-port port-input" data-node-id="${node.id}" data-port-type="input" title="输入端口"></div>
+            <div class="canvas-node-port port-output" data-node-id="${node.id}" data-port-type="output" title="输出端口"></div>
+        </div>
+    `).join('');
+
+    const svgNS = "http://www.w3.org/2000/svg";
+    connectionsContainer.innerHTML = '';
+    
+    canvasConnections.forEach(conn => {
+        const fromNode = canvasNodes.find(n => n.id === conn.from);
+        const toNode = canvasNodes.find(n => n.id === conn.to);
+        if (fromNode && toNode) {
+            const x1 = fromNode.x + 200;
+            const y1 = fromNode.y + 50;
+            const x2 = toNode.x;
+            const y2 = toNode.y + 50;
+            
+            const line = document.createElementNS(svgNS, 'path');
+            const midX = (x1 + x2) / 2;
+            const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+            line.setAttribute('d', d);
+            line.setAttribute('class', 'connection-line');
+            line.setAttribute('data-connection-id', conn.id);
+            connectionsContainer.appendChild(line);
+        }
+    });
+
+    initNodeEvents();
+    updateCanvasEmptyState();
+}
+
+function initNodeEvents() {
+    document.querySelectorAll('.canvas-node').forEach(node => {
+        const nodeId = node.dataset.nodeId;
+
+        node.addEventListener('mousedown', function(e) {
+            if (e.target.classList.contains('canvas-node-port')) return;
+            
+            isDragging = true;
+            selectedNode = nodeId;
+            const nodeData = canvasNodes.find(n => n.id === nodeId);
+            dragOffset.x = e.clientX - nodeData.x;
+            dragOffset.y = e.clientY - nodeData.y;
+            renderCanvas();
+        });
+
+        node.addEventListener('dblclick', function(e) {
+            if (!e.target.classList.contains('canvas-node-port')) {
+                openNodeConfig(nodeId);
+            }
+        });
+    });
+
+    document.querySelectorAll('.canvas-node-port').forEach(port => {
+        port.addEventListener('mousedown', function(e) {
+            e.stopPropagation();
+            const nodeId = this.dataset.nodeId;
+            const portType = this.dataset.portType;
+            
+            if (portType === 'output') {
+                isConnecting = true;
+                connectingFrom = { nodeId, portType };
+                
+                const svgNS = "http://www.w3.org/2000/svg";
+                tempConnectionLine = document.createElementNS(svgNS, 'path');
+                tempConnectionLine.setAttribute('class', 'connection-line temp');
+                document.getElementById('canvasConnections').appendChild(tempConnectionLine);
+            }
+        });
+
+        port.addEventListener('mouseup', function(e) {
+            e.stopPropagation();
+            if (isConnecting && connectingFrom && this.dataset.portType === 'input') {
+                const toNodeId = this.dataset.nodeId;
+                if (connectingFrom.nodeId !== toNodeId) {
+                    addConnection(connectingFrom.nodeId, toNodeId);
+                }
+            }
+            cancelConnecting();
+        });
+    });
+
+    document.addEventListener('mousemove', function(e) {
+        if (isDragging && selectedNode) {
+            const canvasArea = document.getElementById('canvasArea');
+            const rect = canvasArea.getBoundingClientRect();
+            const node = canvasNodes.find(n => n.id === selectedNode);
+            if (node) {
+                node.x = Math.max(0, e.clientX - rect.left - dragOffset.x + canvasArea.scrollLeft);
+                node.y = Math.max(0, e.clientY - rect.top - dragOffset.y + canvasArea.scrollTop);
+                renderCanvas();
+            }
+        }
+
+        if (isConnecting && tempConnectionLine && connectingFrom) {
+            const canvasArea = document.getElementById('canvasArea');
+            const rect = canvasArea.getBoundingClientRect();
+            const fromNode = canvasNodes.find(n => n.id === connectingFrom.nodeId);
+            if (fromNode) {
+                const x1 = fromNode.x + 200;
+                const y1 = fromNode.y + 50;
+                const x2 = e.clientX - rect.left + canvasArea.scrollLeft;
+                const y2 = e.clientY - rect.top + canvasArea.scrollTop;
+                const midX = (x1 + x2) / 2;
+                const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+                tempConnectionLine.setAttribute('d', d);
+            }
+        }
+    });
+
+    document.addEventListener('mouseup', function() {
+        isDragging = false;
+        cancelConnecting();
+    });
+}
+
+function cancelConnecting() {
+    isConnecting = false;
+    connectingFrom = null;
+    if (tempConnectionLine) {
+        tempConnectionLine.remove();
+        tempConnectionLine = null;
+    }
+}
+
+function addConnection(fromNodeId, toNodeId) {
+    const exists = canvasConnections.some(c => c.from === fromNodeId && c.to === toNodeId);
+    if (exists) return;
+
+    const connectionId = `conn_${Date.now()}`;
+    canvasConnections.push({
+        id: connectionId,
+        from: fromNodeId,
+        to: toNodeId,
+    });
+    
+    const fromNode = canvasNodes.find(n => n.id === fromNodeId);
+    const toNode = canvasNodes.find(n => n.id === toNodeId);
+    if (fromNode) fromNode.nodeType = 'source';
+    if (toNode) toNode.nodeType = 'target';
+    
+    renderCanvas();
+    showToast('连接已建立', 'success');
+}
+
+function selectNode(nodeId) {
+    selectedNode = nodeId;
+    renderCanvas();
+    renderInspector();
+}
+
+function deleteCanvasNode(nodeId) {
+    canvasNodes = canvasNodes.filter(n => n.id !== nodeId);
+    canvasConnections = canvasConnections.filter(c => c.from !== nodeId && c.to !== nodeId);
+    if (selectedNode === nodeId) selectedNode = null;
+    renderCanvas();
+    renderInspector();
+    showToast('节点已删除', 'info');
+}
+
+function updateCanvasEmptyState() {
+    const emptyEl = document.getElementById('canvasEmpty');
+    if (canvasNodes.length === 0) {
+        emptyEl.style.display = 'flex';
+    } else {
+        emptyEl.style.display = 'none';
+    }
+}
+
+function clearCanvas() {
+    if (canvasNodes.length === 0) return;
+    if (!confirm('确定要清空画布吗？所有节点和连接都将被清除。')) return;
+    
+    canvasNodes = [];
+    canvasConnections = [];
+    selectedNode = null;
+    renderCanvas();
+    renderInspector();
+    showToast('画布已清空', 'info');
+}
+
+function autoLayout() {
+    if (canvasNodes.length === 0) return;
+    
+    const sourceNodes = canvasNodes.filter(n => n.nodeType === 'source' || canvasConnections.some(c => c.from === n.id));
+    const targetNodes = canvasNodes.filter(n => n.nodeType === 'target' || canvasConnections.some(c => c.to === n.id));
+    const otherNodes = canvasNodes.filter(n => !sourceNodes.includes(n) && !targetNodes.includes(n));
+    
+    const startX = 100;
+    const startY = 100;
+    const spacingY = 120;
+    
+    sourceNodes.forEach((node, index) => {
+        node.x = startX;
+        node.y = startY + index * spacingY;
+    });
+    
+    targetNodes.forEach((node, index) => {
+        node.x = startX + 400;
+        node.y = startY + index * spacingY;
+    });
+    
+    otherNodes.forEach((node, index) => {
+        node.x = startX + 200;
+        node.y = startY + (sourceNodes.length + index) * spacingY;
+    });
+    
+    renderCanvas();
+    showToast('自动布局完成', 'success');
+}
+
+function renderInspector() {
+    const body = document.getElementById('inspectorBody');
+    
+    if (!selectedNode) {
+        body.innerHTML = `
+            <div class="inspector-empty">
+                <svg width="40" height="40" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
+                </svg>
+                <p>选中节点查看属性</p>
+            </div>
+        `;
+        return;
+    }
+
+    const node = canvasNodes.find(n => n.id === selectedNode);
+    if (!node) return;
+
+    body.innerHTML = `
+        <div class="inspector-section">
+            <h5>基本信息</h5>
+            <div class="form-group">
+                <label>节点名称</label>
+                <input type="text" value="${node.name}" onchange="updateNodeProperty('${node.id}', 'name', this.value)">
+            </div>
+            <div class="form-group">
+                <label>节点类型</label>
+                <select onchange="updateNodeProperty('${node.id}', 'nodeType', this.value)">
+                    <option value="source" ${node.nodeType === 'source' ? 'selected' : ''}>源节点</option>
+                    <option value="target" ${node.nodeType === 'target' ? 'selected' : ''}>目标节点</option>
+                </select>
+            </div>
+            <div class="form-group">
+                <label>数据库类型</label>
+                <input type="text" value="${DB_TYPE_LABELS[node.type] || node.type}" disabled>
+            </div>
+        </div>
+        <div class="inspector-section">
+            <h5>同步配置</h5>
+            <button class="btn-secondary btn-sm btn-block" onclick="loadNodeTables('${node.id}')">
+                ${node.tables.length > 0 ? `已选择 ${node.tables.length} 张表` : '选择同步表'}
+            </button>
+            ${node.tables.length > 0 ? `
+                <div class="selected-tables-list">
+                    ${node.tables.map(t => `<span class="table-tag">${t}</span>`).join('')}
+                </div>
+            ` : ''}
+        </div>
+        <div class="inspector-section">
+            <h5>操作</h5>
+            <button class="btn-secondary btn-sm btn-block" onclick="openNodeConfig('${node.id}')">详细配置</button>
+            <button class="btn-danger btn-sm btn-block" onclick="deleteCanvasNode('${node.id}')">删除节点</button>
+        </div>
+    `;
+}
+
+function updateNodeProperty(nodeId, property, value) {
+    const node = canvasNodes.find(n => n.id === nodeId);
+    if (node) {
+        node[property] = value;
+        renderCanvas();
+    }
+}
+
+async function loadNodeTables(nodeId) {
+    const node = canvasNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    showToast('正在加载表列表...', 'info');
+    const data = await apiRequest(`/api/resources/${node.resourceId}/tables`);
+    if (data && data.success) {
+        const tables = data.tables || [];
+        showNodeTableSelector(nodeId, tables);
+    } else {
+        showToast('加载表列表失败', 'error');
+    }
+}
+
+function showNodeTableSelector(nodeId, tables) {
+    const node = canvasNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    const selected = node.tables || [];
+    
+    const modal = document.getElementById('nodeConfigModal');
+    const body = document.getElementById('nodeConfigBody');
+    document.getElementById('nodeConfigTitle').textContent = `选择同步表 - ${node.name}`;
+    
+    body.innerHTML = `
+        <div style="margin-bottom: 12px;">
+            <label class="table-checkbox-item">
+                <input type="checkbox" id="selectAllNodeTables" onchange="toggleAllNodeTables(this)" ${selected.length === tables.length ? 'checked' : ''}>
+                <strong>全选 (${tables.length} 张表)</strong>
+            </label>
+        </div>
+        <div class="tables-checkboxes" id="nodeTablesCheckboxes">
+            ${tables.map(table => `
+                <label class="table-checkbox-item">
+                    <input type="checkbox" value="${table}" data-node-id="${nodeId}" onchange="toggleNodeTable(this)" ${selected.includes(table) ? 'checked' : ''}>
+                    ${table}
+                </label>
+            `).join('')}
+        </div>
+    `;
+    
+    currentConfigNodeId = nodeId;
+    modal.classList.add('active');
+}
+
+let currentConfigNodeId = null;
+
+function toggleAllNodeTables(checkbox) {
+    const checkboxes = document.querySelectorAll('#nodeTablesCheckboxes input[type="checkbox"]');
+    checkboxes.forEach(cb => {
+        cb.checked = checkbox.checked;
+        toggleNodeTable(cb);
+    });
+}
+
+function toggleNodeTable(checkbox) {
+    const nodeId = checkbox.dataset.nodeId || currentConfigNodeId;
+    const node = canvasNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    const table = checkbox.value;
+    if (!node.tables) node.tables = [];
+    
+    if (checkbox.checked) {
+        if (!node.tables.includes(table)) {
+            node.tables.push(table);
+        }
+    } else {
+        node.tables = node.tables.filter(t => t !== table);
+    }
+    
+    renderInspector();
+}
+
+function openNodeConfig(nodeId) {
+    const node = canvasNodes.find(n => n.id === nodeId);
+    if (!node) return;
+
+    const modal = document.getElementById('nodeConfigModal');
+    const body = document.getElementById('nodeConfigBody');
+    document.getElementById('nodeConfigTitle').textContent = `节点配置 - ${node.name}`;
+    
+    body.innerHTML = `
+        <div class="form-group">
+            <label>节点名称</label>
+            <input type="text" id="configNodeName" value="${node.name}">
+        </div>
+        <div class="form-group">
+            <label>节点角色</label>
+            <select id="configNodeType">
+                <option value="source" ${node.nodeType === 'source' ? 'selected' : ''}>源数据库（读取数据）</option>
+                <option value="target" ${node.nodeType === 'target' ? 'selected' : ''}>目标数据库（写入数据）</option>
+            </select>
+        </div>
+        <div class="form-group">
+            <label>数据库类型</label>
+            <input type="text" value="${DB_TYPE_LABELS[node.type] || node.type}" disabled>
+        </div>
+        <div class="form-group">
+            <label>已选表数</label>
+            <input type="text" value="${node.tables.length} 张" disabled>
+        </div>
+        <div style="margin-top: 16px;">
+            <button class="btn-secondary btn-sm" onclick="loadNodeTables('${nodeId}')">选择同步表</button>
+        </div>
+    `;
+    
+    currentConfigNodeId = nodeId;
+    modal.classList.add('active');
+}
+
+function saveNodeConfig() {
+    if (!currentConfigNodeId) return;
+    
+    const node = canvasNodes.find(n => n.id === currentConfigNodeId);
+    if (!node) return;
+    
+    const nameInput = document.getElementById('configNodeName');
+    const typeSelect = document.getElementById('configNodeType');
+    
+    if (nameInput) node.name = nameInput.value;
+    if (typeSelect) node.nodeType = typeSelect.value;
+    
+    closeNodeConfigModal();
+    renderCanvas();
+    renderInspector();
+    showToast('节点配置已保存', 'success');
+}
+
+function closeNodeConfigModal() {
+    document.getElementById('nodeConfigModal').classList.remove('active');
+    currentConfigNodeId = null;
+}
+
+async function savePipeline() {
+    if (canvasNodes.length === 0) {
+        showToast('请先添加节点到画布', 'error');
+        return;
+    }
+
+    const name = prompt('请输入流水线名称：', `流水线_${new Date().toLocaleDateString()}`);
+    if (!name) return;
+
+    const pipeline = {
+        name: name,
+        nodes: canvasNodes,
+        connections: canvasConnections,
+        config: {
+            parallel_tables: 4,
+            chunk_size: 50000,
+            batch_insert_size: 5000,
+        },
+    };
+
+    const data = await apiRequest('/api/pipelines', 'POST', pipeline);
+    if (data && data.success) {
+        showToast('流水线保存成功', 'success');
+    } else {
+        showToast(data?.message || '保存失败', 'error');
+    }
+}
+
+// ====================================================================== //
+//                           流水线管理功能
+// ====================================================================== //
+
+async function loadPipelines() {
+    const data = await apiRequest('/api/pipelines');
+    if (!data || !data.success) return;
+
+    const pipelines = data.pipelines || [];
+    const container = document.getElementById('pipelineList');
+
+    if (pipelines.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <line x1="18" y1="20" x2="18" y2="10"></line>
+                    <line x1="12" y1="20" x2="12" y2="4"></line>
+                    <line x1="6" y1="20" x2="6" y2="14"></line>
+                </svg>
+                <h4>暂无流水线</h4>
+                <p>在同步画布中创建您的第一个流水线</p>
+                <button class="btn-primary" onclick="switchTab('canvas')">打开画布</button>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = pipelines.map(pipeline => `
+        <div class="pipeline-card">
+            <div class="pipeline-card-header">
+                <div class="pipeline-icon">
+                    <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                        <line x1="18" y1="20" x2="18" y2="10"></line>
+                        <line x1="12" y1="20" x2="12" y2="4"></line>
+                        <line x1="6" y1="20" x2="6" y2="14"></line>
+                    </svg>
+                </div>
+                <div class="pipeline-info">
+                    <h4>${pipeline.name}</h4>
+                    <span class="pipeline-meta">${pipeline.nodes?.length || 0} 个节点 · ${pipeline.connections?.length || 0} 个连接</span>
+                </div>
+                <span class="status-badge status-${pipeline.status || 'idle'}">${getStatusLabel(pipeline.status)}</span>
+            </div>
+            <div class="pipeline-card-body">
+                <div class="pipeline-detail-item">
+                    <span class="label">创建时间</span>
+                    <span class="value">${formatDate(pipeline.created_at)}</span>
+                </div>
+                ${pipeline.description ? `
+                    <div class="pipeline-detail-item">
+                        <span class="label">描述</span>
+                        <span class="value">${pipeline.description}</span>
+                    </div>
+                ` : ''}
+            </div>
+            <div class="pipeline-card-footer">
+                <button class="btn-secondary btn-sm" onclick="editPipelineInCanvas('${pipeline.pipeline_id}')">编辑</button>
+                <button class="btn-primary btn-sm" onclick="startPipeline('${pipeline.pipeline_id}')">启动同步</button>
+                <button class="btn-danger btn-sm" onclick="deletePipeline('${pipeline.pipeline_id}')">删除</button>
+            </div>
+        </div>
+    `).join('');
+}
+
+function getStatusLabel(status) {
+    const labels = {
+        idle: '未运行',
+        running: '运行中',
+        completed: '已完成',
+        failed: '失败',
+    };
+    return labels[status] || status;
+}
+
+async function editPipelineInCanvas(pipelineId) {
+    const data = await apiRequest(`/api/pipelines/${pipelineId}`);
+    if (!data || !data.success) return;
+
+    const pipeline = data.pipeline;
+    canvasNodes = pipeline.nodes || [];
+    canvasConnections = pipeline.connections || [];
+    selectedNode = null;
+    nodeIdCounter = canvasNodes.length;
+    
+    switchTab('canvas');
+    setTimeout(() => {
+        renderCanvas();
+        renderInspector();
+        showToast('流水线已加载到画布', 'success');
+    }, 100);
+}
+
+async function startPipeline(pipelineId) {
+    if (!confirm('确定要启动此流水线吗？')) return;
+
+    showToast('正在启动同步任务...', 'info');
+    const data = await apiRequest(`/api/pipelines/${pipelineId}/start`, 'POST', { mode: 'resume' });
+    if (data && data.success) {
+        showToast('同步任务已启动', 'success');
+        setTimeout(() => {
+            switchTab('tasks');
+        }, 1000);
+    } else {
+        showToast(data?.message || '启动失败', 'error');
+    }
+}
+
+async function deletePipeline(pipelineId) {
+    if (!confirm('确定要删除此流水线吗？删除后将无法恢复。')) return;
+
+    const data = await apiRequest(`/api/pipelines/${pipelineId}`, 'DELETE');
+    if (data && data.success) {
+        showToast('流水线删除成功', 'success');
+        loadPipelines();
+    }
+}
+
+// ====================================================================== //
+//                           快速开始向导
+// ====================================================================== //
+
+function showQuickStart() {
+    document.getElementById('quickStartModal').classList.add('active');
+}
+
+function closeQuickStartModal() {
+    document.getElementById('quickStartModal').classList.remove('active');
+}
+
+// ====================================================================== //
+//                           更新仪表盘加载
+// ====================================================================== //
+
+async function loadDashboard() {
+    const data = await apiRequest('/api/dashboard');
+    if (!data || !data.success) return;
+
+    const stats = data.stats;
+    
+    const statResources = document.getElementById('statResources');
+    const statPipelines = document.getElementById('statPipelines');
+    
+    if (statResources) statResources.textContent = stats.total_resources || 0;
+    if (statPipelines) statPipelines.textContent = stats.total_pipelines || 0;
+    
+    const statRunning = document.getElementById('statRunning');
+    if (statRunning) statRunning.textContent = stats.running_tasks || 0;
+    
+    const statSyncedRows = document.getElementById('statSyncedRows');
+    const statSyncedRows2 = document.getElementById('statSyncedRows2');
+    if (statSyncedRows) statSyncedRows.textContent = formatNumber(stats.synced_rows || 0);
+    if (statSyncedRows2) statSyncedRows2.textContent = formatNumber(stats.synced_rows || 0);
+
+    const percentage = stats.total_rows > 0 ? Math.round((stats.synced_rows / stats.total_rows) * 100) : 0;
+    const overallPercentage = document.getElementById('overallPercentage');
+    if (overallPercentage) {
+        overallPercentage.textContent = percentage + '%';
+        updateProgressRing(percentage);
+    }
+    
+    const completedTables = document.getElementById('statCompletedTables');
+    const totalTables = document.getElementById('statTotalTables');
+    const totalRows = document.getElementById('statTotalRows');
+    
+    if (completedTables) completedTables.textContent = stats.completed_tables || 0;
+    if (totalTables) totalTables.textContent = stats.total_tables_in_progress || 0;
+    if (totalRows) totalRows.textContent = formatNumber(stats.total_rows || 0);
+
+    renderRecentActivity(data.recent_tasks);
+}
+
+function renderRecentActivity(tasks) {
+    const container = document.getElementById('recentActivityList');
+    
+    if (!tasks || tasks.length === 0) {
+        container.innerHTML = `
+            <div class="empty-state-small">
+                <p>暂无活动记录</p>
+            </div>
+        `;
+        return;
+    }
+
+    container.innerHTML = tasks.map(task => `
+        <div class="activity-item" onclick="viewTaskDetail('${task.task_id}')">
+            <div class="activity-icon ${task.status}">
+                ${task.status === 'completed' ? '✓' : task.status === 'running' ? '▶' : task.status === 'failed' ? '✕' : '○'}
+            </div>
+            <div class="activity-content">
+                <div class="activity-title">${task.config_name}</div>
+                <div class="activity-meta">${getModeLabel(task.mode)} · ${formatDate(task.created_at)}</div>
+            </div>
+            ${getStatusBadge(task.status)}
+        </div>
+    `).join('');
 }

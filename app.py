@@ -411,35 +411,6 @@ def reset_progress():
     return jsonify({"success": True, "message": "进度已重置"})
 
 
-@app.route("/api/dashboard", methods=["GET"])
-@login_required
-def get_dashboard():
-    """获取仪表盘数据。"""
-    tasks = db2_store.list_tasks(request.username)
-    progress_list = db2_store.list_progress()
-
-    stats = {
-        "total_tasks": len(tasks),
-        "running_tasks": sum(1 for t in tasks if t["status"] == "running"),
-        "completed_tasks": sum(1 for t in tasks if t["status"] == "completed"),
-        "failed_tasks": sum(1 for t in tasks if t["status"] == "failed"),
-        "total_tables_in_progress": len(progress_list),
-        "completed_tables": sum(1 for p in progress_list if p["status"] == "done"),
-        "total_rows": sum(p["total_rows"] for p in progress_list),
-        "synced_rows": sum(p["synced_rows"] for p in progress_list),
-    }
-
-    recent_tasks = tasks[:5]
-    active_progress = [p for p in progress_list if p["status"] in ["running", "failed"]][:10]
-
-    return jsonify({
-        "success": True,
-        "stats": stats,
-        "recent_tasks": recent_tasks,
-        "active_progress": active_progress,
-    })
-
-
 # ====================================================================== #
 #                        实时同步 API
 # ====================================================================== #
@@ -911,6 +882,240 @@ def get_smart_sync_dashboard():
         "success": True,
         "stats": stats,
         "recent_tasks": tasks[:5],
+    })
+
+
+# ====================================================================== #
+#                           资源管理 API
+# ====================================================================== #
+
+@app.route("/api/resources", methods=["GET"])
+@login_required
+def list_resources():
+    """列出所有数据库资源。"""
+    resources = db2_store.list_resources(request.username)
+    return jsonify({"success": True, "resources": resources})
+
+@app.route("/api/resources/<resource_id>", methods=["GET"])
+@login_required
+def get_resource(resource_id):
+    """获取指定资源详情。"""
+    resource = db2_store.get_resource(resource_id)
+    if not resource:
+        return jsonify({"success": False, "message": "资源不存在"}), 404
+    return jsonify({"success": True, "resource": resource})
+
+@app.route("/api/resources", methods=["POST"])
+@login_required
+def create_resource():
+    """创建新的数据库资源。"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "请求数据为空"}), 400
+
+    resource_id = str(uuid.uuid4())
+    resource = db2_store.save_resource(resource_id, data, request.username)
+    logger.info("资源已创建: %s (类型: %s, 用户: %s)", resource_id, data.get("type"), request.username)
+    return jsonify({"success": True, "message": "资源创建成功", "resource": resource})
+
+@app.route("/api/resources/<resource_id>", methods=["PUT"])
+@login_required
+def update_resource(resource_id):
+    """更新数据库资源。"""
+    resource = db2_store.get_resource(resource_id)
+    if not resource:
+        return jsonify({"success": False, "message": "资源不存在"}), 404
+
+    data = request.get_json() or {}
+    updated = db2_store.save_resource(resource_id, {**resource, **data}, request.username)
+    logger.info("资源已更新: %s (用户: %s)", resource_id, request.username)
+    return jsonify({"success": True, "message": "资源更新成功", "resource": updated})
+
+@app.route("/api/resources/<resource_id>", methods=["DELETE"])
+@login_required
+def delete_resource(resource_id):
+    """删除数据库资源。"""
+    if db2_store.delete_resource(resource_id):
+        logger.info("资源已删除: %s (用户: %s)", resource_id, request.username)
+        return jsonify({"success": True, "message": "资源删除成功"})
+    return jsonify({"success": False, "message": "资源不存在"}), 404
+
+@app.route("/api/resources/<resource_id>/test", methods=["POST"])
+@login_required
+def test_resource(resource_id):
+    """测试资源连接。"""
+    resource = db2_store.get_resource(resource_id)
+    if not resource:
+        return jsonify({"success": False, "message": "资源不存在"}), 404
+
+    try:
+        adapter = get_adapter(resource)
+        success, msg = adapter.test_connection()
+        return jsonify({
+            "success": success,
+            "message": msg,
+            "type": resource.get("type", "mysql"),
+        })
+    except Exception as e:
+        return jsonify({"success": False, "message": str(e)})
+
+@app.route("/api/resources/<resource_id>/tables", methods=["GET"])
+@login_required
+def get_resource_tables(resource_id):
+    """获取资源数据库中的表列表。"""
+    resource = db2_store.get_resource(resource_id)
+    if not resource:
+        return jsonify({"success": False, "message": "资源不存在"}), 404
+
+    try:
+        adapter = get_adapter(resource)
+        conn = adapter.create_connection()
+        try:
+            tables = adapter.list_tables(conn)
+        finally:
+            adapter.close_connection(conn)
+        logger.info("获取资源表列表: %s, %d 个表", resource_id, len(tables))
+        return jsonify({"success": True, "tables": tables})
+    except Exception as e:
+        logger.error("获取表列表失败: %s", e)
+        return jsonify({"success": False, "message": f"获取表列表失败: {str(e)}"}), 500
+
+# ====================================================================== #
+#                           流水线管理 API
+# ====================================================================== #
+
+@app.route("/api/pipelines", methods=["GET"])
+@login_required
+def list_pipelines():
+    """列出所有同步流水线。"""
+    pipelines = db2_store.list_pipelines(request.username)
+    return jsonify({"success": True, "pipelines": pipelines})
+
+@app.route("/api/pipelines/<pipeline_id>", methods=["GET"])
+@login_required
+def get_pipeline(pipeline_id):
+    """获取指定流水线详情。"""
+    pipeline = db2_store.get_pipeline(pipeline_id)
+    if not pipeline:
+        return jsonify({"success": False, "message": "流水线不存在"}), 404
+    return jsonify({"success": True, "pipeline": pipeline})
+
+@app.route("/api/pipelines", methods=["POST"])
+@login_required
+def create_pipeline():
+    """创建新的同步流水线。"""
+    data = request.get_json()
+    if not data:
+        return jsonify({"success": False, "message": "请求数据为空"}), 400
+
+    pipeline_id = str(uuid.uuid4())
+    pipeline = db2_store.save_pipeline(pipeline_id, data, request.username)
+    logger.info("流水线已创建: %s (用户: %s)", pipeline_id, request.username)
+    return jsonify({"success": True, "message": "流水线创建成功", "pipeline": pipeline})
+
+@app.route("/api/pipelines/<pipeline_id>", methods=["PUT"])
+@login_required
+def update_pipeline(pipeline_id):
+    """更新同步流水线。"""
+    pipeline = db2_store.get_pipeline(pipeline_id)
+    if not pipeline:
+        return jsonify({"success": False, "message": "流水线不存在"}), 404
+
+    data = request.get_json() or {}
+    updated = db2_store.save_pipeline(pipeline_id, {**pipeline, **data}, request.username)
+    logger.info("流水线已更新: %s (用户: %s)", pipeline_id, request.username)
+    return jsonify({"success": True, "message": "流水线更新成功", "pipeline": updated})
+
+@app.route("/api/pipelines/<pipeline_id>", methods=["DELETE"])
+@login_required
+def delete_pipeline(pipeline_id):
+    """删除同步流水线。"""
+    if db2_store.delete_pipeline(pipeline_id):
+        logger.info("流水线已删除: %s (用户: %s)", pipeline_id, request.username)
+        return jsonify({"success": True, "message": "流水线删除成功"})
+    return jsonify({"success": False, "message": "流水线不存在"}), 404
+
+@app.route("/api/pipelines/<pipeline_id>/start", methods=["POST"])
+@login_required
+def start_pipeline(pipeline_id):
+    """从流水线启动同步任务。"""
+    pipeline = db2_store.get_pipeline(pipeline_id)
+    if not pipeline:
+        return jsonify({"success": False, "message": "流水线不存在"}), 404
+
+    config = db2_store.convert_pipeline_to_config(pipeline_id)
+    if not config:
+        return jsonify({"success": False, "message": "流水线配置不完整，无法启动"}), 400
+
+    config_name = f"pipeline_{pipeline['name']}_{pipeline_id[:8]}"
+    db2_store.save_config(config_name, config, request.username)
+
+    data = request.get_json() or {}
+    mode = data.get("mode", "resume")
+
+    task_id = str(uuid.uuid4())
+    task = db2_store.create_task(task_id, config_name, request.username, mode)
+    db2_store.update_pipeline_status(pipeline_id, "running", "同步任务已启动")
+
+    stop_flag = {"stop": False}
+    task_stop_flags[task_id] = stop_flag
+
+    def sync_worker():
+        try:
+            run_sync(config, resume_mode=(mode == "resume"), restart=(mode == "restart"),
+                     task_id=task_id, stop_flag=stop_flag)
+            db2_store.update_pipeline_status(pipeline_id, "completed", "同步完成")
+        except Exception as e:
+            logger.error("流水线任务 %s 失败: %s", task_id, e)
+            db2_store.update_task(task_id, status="failed", message=f"任务失败: {str(e)}")
+            db2_store.update_pipeline_status(pipeline_id, "failed", f"同步失败: {str(e)}")
+        finally:
+            if task_id in running_tasks:
+                del running_tasks[task_id]
+            if task_id in task_stop_flags:
+                del task_stop_flags[task_id]
+
+    thread = threading.Thread(target=sync_worker, daemon=True)
+    running_tasks[task_id] = thread
+    thread.start()
+
+    logger.info("流水线任务已启动: %s (流水线: %s, 用户: %s)", task_id, pipeline_id, request.username)
+    return jsonify({"success": True, "message": "同步任务已启动", "task_id": task_id})
+
+# ====================================================================== #
+#                        更新仪表盘 API 支持新数据模型
+# ====================================================================== #
+
+@app.route("/api/dashboard", methods=["GET"])
+@login_required
+def get_dashboard():
+    """获取仪表盘数据。"""
+    tasks = db2_store.list_tasks(request.username)
+    progress_list = db2_store.list_progress()
+    resources = db2_store.list_resources(request.username)
+    pipelines = db2_store.list_pipelines(request.username)
+
+    stats = {
+        "total_tasks": len(tasks),
+        "running_tasks": sum(1 for t in tasks if t["status"] == "running"),
+        "completed_tasks": sum(1 for t in tasks if t["status"] == "completed"),
+        "failed_tasks": sum(1 for t in tasks if t["status"] == "failed"),
+        "total_tables_in_progress": len(progress_list),
+        "completed_tables": sum(1 for p in progress_list if p["status"] == "done"),
+        "total_rows": sum(p["total_rows"] for p in progress_list),
+        "synced_rows": sum(p["synced_rows"] for p in progress_list),
+        "total_resources": len(resources),
+        "total_pipelines": len(pipelines),
+    }
+
+    recent_tasks = tasks[:5]
+    active_progress = [p for p in progress_list if p["status"] in ["running", "failed"]][:10]
+
+    return jsonify({
+        "success": True,
+        "stats": stats,
+        "recent_tasks": recent_tasks,
+        "active_progress": active_progress,
     })
 
 

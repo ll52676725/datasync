@@ -30,6 +30,8 @@ class DB2MemoryStore:
         self._sync_tasks: Dict[str, Dict] = {}
         self._sessions: Dict[str, Dict] = {}
         self._realtime_tasks: Dict[str, Dict] = {}
+        self._resources: Dict[str, Dict] = {}
+        self._pipelines: Dict[str, Dict] = {}
         self._persistence_lock = threading.Lock()
         self._last_persist_time = 0
         self._persist_interval = 1.0
@@ -58,9 +60,13 @@ class DB2MemoryStore:
                 self._sync_tasks = data.get("sync_tasks", {})
                 self._realtime_tasks = data.get("realtime_tasks", {})
                 self._users = data.get("users", self._users)
+                self._resources = data.get("resources", {})
+                self._pipelines = data.get("pipelines", {})
                 logger.info("从持久化文件加载状态成功: %s", PERSISTENCE_FILE)
                 logger.info("  - 配置: %d 个", len(self._configs))
                 logger.info("  - 实时任务: %d 个", len(self._realtime_tasks))
+                logger.info("  - 资源: %d 个", len(self._resources))
+                logger.info("  - 流水线: %d 个", len(self._pipelines))
         except Exception as e:
             logger.error("加载持久化状态失败: %s", e)
 
@@ -73,6 +79,8 @@ class DB2MemoryStore:
                 "sync_tasks": self._sync_tasks,
                 "realtime_tasks": self._realtime_tasks,
                 "users": self._users,
+                "resources": self._resources,
+                "pipelines": self._pipelines,
                 "persisted_at": datetime.now().isoformat(),
             }
             tmp_file = PERSISTENCE_FILE + ".tmp"
@@ -470,6 +478,161 @@ class DB2MemoryStore:
         """列出所有智能同步任务。"""
         tasks = self.list_realtime_tasks(username)
         return [t for t in tasks if t.get("type") == "smart_sync"]
+
+    # ------------------------------------------------------------------ #
+    #                           资源管理
+    # ------------------------------------------------------------------ #
+
+    def save_resource(self, resource_id: str, resource: Dict, username: str) -> Dict:
+        """保存数据库资源。"""
+        self._resources[resource_id] = {
+            "resource_id": resource_id,
+            "name": resource.get("name", ""),
+            "type": resource.get("type", "mysql"),
+            "host": resource.get("host", ""),
+            "port": resource.get("port", 3306),
+            "user": resource.get("user", ""),
+            "password": resource.get("password", ""),
+            "database": resource.get("database", ""),
+            "created_by": username,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+        }
+        logger.info("保存资源: %s (类型: %s, 用户: %s)", resource_id, resource.get("type"), username)
+        self._mark_dirty()
+        return self._resources[resource_id]
+
+    def get_resource(self, resource_id: str) -> Optional[Dict]:
+        """获取指定资源。"""
+        return self._resources.get(resource_id)
+
+    def list_resources(self, username: Optional[str] = None) -> List[Dict]:
+        """列出所有资源。"""
+        resources = list(self._resources.values())
+        if username:
+            resources = [r for r in resources if r["created_by"] == username]
+        return sorted(resources, key=lambda x: x["created_at"], reverse=True)
+
+    def delete_resource(self, resource_id: str) -> bool:
+        """删除资源。"""
+        if resource_id in self._resources:
+            del self._resources[resource_id]
+            logger.info("删除资源: %s", resource_id)
+            self._mark_dirty()
+            return True
+        return False
+
+    def test_resource_connection(self, resource_id: str) -> Dict:
+        """测试资源连接（返回模拟结果，实际由后端适配器执行）。"""
+        resource = self.get_resource(resource_id)
+        if not resource:
+            return {"success": False, "message": "资源不存在"}
+        return {"success": True, "message": "连接测试通过", "resource": resource}
+
+    # ------------------------------------------------------------------ #
+    #                           流水线管理
+    # ------------------------------------------------------------------ #
+
+    def save_pipeline(self, pipeline_id: str, pipeline: Dict, username: str) -> Dict:
+        """保存同步流水线。"""
+        self._pipelines[pipeline_id] = {
+            "pipeline_id": pipeline_id,
+            "name": pipeline.get("name", "未命名流水线"),
+            "description": pipeline.get("description", ""),
+            "nodes": pipeline.get("nodes", []),
+            "connections": pipeline.get("connections", []),
+            "config": pipeline.get("config", {}),
+            "created_by": username,
+            "created_at": datetime.now().isoformat(),
+            "updated_at": datetime.now().isoformat(),
+            "status": "idle",
+        }
+        logger.info("保存流水线: %s (节点数: %d, 用户: %s)", pipeline_id, len(pipeline.get("nodes", [])), username)
+        self._mark_dirty()
+        return self._pipelines[pipeline_id]
+
+    def get_pipeline(self, pipeline_id: str) -> Optional[Dict]:
+        """获取指定流水线。"""
+        return self._pipelines.get(pipeline_id)
+
+    def list_pipelines(self, username: Optional[str] = None) -> List[Dict]:
+        """列出所有流水线。"""
+        pipelines = list(self._pipelines.values())
+        if username:
+            pipelines = [p for p in pipelines if p["created_by"] == username]
+        return sorted(pipelines, key=lambda x: x["created_at"], reverse=True)
+
+    def delete_pipeline(self, pipeline_id: str) -> bool:
+        """删除流水线。"""
+        if pipeline_id in self._pipelines:
+            del self._pipelines[pipeline_id]
+            logger.info("删除流水线: %s", pipeline_id)
+            self._mark_dirty()
+            return True
+        return False
+
+    def update_pipeline_status(self, pipeline_id: str, status: str, message: str = ""):
+        """更新流水线状态。"""
+        if pipeline_id in self._pipelines:
+            self._pipelines[pipeline_id].update({
+                "status": status,
+                "message": message,
+                "updated_at": datetime.now().isoformat(),
+            })
+            self._mark_dirty()
+
+    def convert_pipeline_to_config(self, pipeline_id: str) -> Optional[Dict]:
+        """将流水线配置转换为传统的同步配置格式。"""
+        pipeline = self.get_pipeline(pipeline_id)
+        if not pipeline:
+            return None
+
+        nodes = pipeline.get("nodes", [])
+        connections = pipeline.get("connections", [])
+
+        source_nodes = [n for n in nodes if n.get("type") == "source"]
+        target_nodes = [n for n in nodes if n.get("type") == "target"]
+
+        if not source_nodes or not target_nodes:
+            return None
+
+        source_node = source_nodes[0]
+        target_node = target_nodes[0]
+
+        source_resource = self.get_resource(source_node.get("resourceId"))
+        target_resource = self.get_resource(target_node.get("resourceId"))
+
+        if not source_resource or not target_resource:
+            return None
+
+        config = {
+            "source": {
+                "type": source_resource["type"],
+                "host": source_resource["host"],
+                "port": source_resource["port"],
+                "user": source_resource["user"],
+                "password": source_resource["password"],
+                "database": source_resource["database"],
+                "charset": "utf8mb4",
+            },
+            "target": {
+                "type": target_resource["type"],
+                "host": target_resource["host"],
+                "port": target_resource["port"],
+                "user": target_resource["user"],
+                "password": target_resource["password"],
+                "database": target_resource["database"],
+                "charset": "utf8mb4",
+            },
+            "sync": {
+                "parallel_tables": pipeline.get("config", {}).get("parallel_tables", 4),
+                "chunk_size": pipeline.get("config", {}).get("chunk_size", 50000),
+                "batch_insert_size": pipeline.get("config", {}).get("batch_insert_size", 5000),
+                "tables": source_node.get("tables", []),
+            },
+        }
+
+        return config
 
 
 db2_store = DB2MemoryStore()
