@@ -293,6 +293,8 @@ def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=N
     6. 更新任务状态到内存存储
     7. 汇总结果
 
+    支持多源同步：当 sync.multiSource 存在时，依次从每个源同步表到目标。
+
     Args:
         config: 同步配置字典，包含 source/target/sync 节
         resume_mode: 是否断点续传模式
@@ -303,10 +305,82 @@ def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=N
     Returns:
         同步结果列表
     """
-    src_cfg = config["source"]
     tgt_cfg = config["target"]
     sync_cfg = config["sync"]
+    multi_source = sync_cfg.get("multiSource")
 
+    if multi_source:
+        return _run_sync_multi_source(
+            multi_source, tgt_cfg, sync_cfg,
+            resume_mode, restart, task_id, stop_flag
+        )
+
+    return _run_sync_single_source(
+        config["source"], tgt_cfg, sync_cfg,
+        resume_mode, restart, task_id, stop_flag
+    )
+
+
+def _run_sync_multi_source(source_cfgs, tgt_cfg, sync_cfg,
+                           resume_mode, restart, task_id, stop_flag):
+    """多源同步：依次从每个源数据库同步表到同一目标。"""
+    all_results = []
+    all_tables = sync_cfg.get("tables", [])
+
+    for src_idx, src_cfg in enumerate(source_cfgs):
+        src_adapter = get_adapter(src_cfg)
+        logger.info("=" * 60)
+        logger.info("多源同步 [%d/%d]: %s → 目标",
+                     src_idx + 1, len(source_cfgs), src_adapter.db_type)
+        logger.info("源: %s:%d/%s", src_cfg.get("host"),
+                     int(src_cfg.get("port", 0)), src_cfg.get("database"))
+        logger.info("目标: %s:%d/%s", tgt_cfg.get("host"),
+                     int(tgt_cfg.get("port", 0)), tgt_cfg.get("database"))
+        logger.info("=" * 60)
+
+        src_tables = _resolve_tables(src_cfg, all_tables)
+
+        single_config = {
+            "source": src_cfg,
+            "target": tgt_cfg,
+            "sync": {**sync_cfg, "tables": src_tables},
+        }
+        if "multiSource" in single_config["sync"]:
+            del single_config["sync"]["multiSource"]
+
+        results = _run_sync_single_source(
+            src_cfg, tgt_cfg, single_config["sync"],
+            resume_mode, restart, task_id, stop_flag
+        )
+        all_results.extend(results)
+
+        if stop_flag and stop_flag.get("stop"):
+            logger.info("多源同步被用户停止，已处理 %d/%d 个源",
+                         src_idx + 1, len(source_cfgs))
+            break
+
+    return all_results
+
+
+def _resolve_tables(src_cfg, requested_tables):
+    """解析要同步的表列表，为空时从源库自动发现。"""
+    if requested_tables:
+        return requested_tables
+
+    src_adapter = get_adapter(src_cfg)
+    conn = src_adapter.create_connection()
+    try:
+        tables = src_adapter.list_tables(conn)
+    finally:
+        src_adapter.close_connection(conn)
+
+    logger.info("未指定同步表，从源库发现 %d 张表", len(tables))
+    return tables
+
+
+def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
+                            resume_mode, restart, task_id, stop_flag):
+    """单源同步：从一个源数据库同步表到目标。"""
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
     logger.info("=" * 60)
@@ -326,12 +400,7 @@ def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=N
         logger.info("重新开始模式: 已重置所有进度，将清空并重新同步")
 
     if not tables:
-        logger.info("未指定同步表，正在从源数据库发现所有表...")
-        conn = src_adapter.create_connection()
-        try:
-            tables = src_adapter.list_tables(conn)
-        finally:
-            src_adapter.close_connection(conn)
+        tables = _resolve_tables(src_cfg, [])
 
     logger.info("待同步表: %s", tables)
 
@@ -341,7 +410,6 @@ def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=N
     total_start = time.time()
     results = []
 
-    # 更新任务状态为运行中
     db2_store.update_task(
         task_id, status="running",
         started_at=time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -386,7 +454,6 @@ def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=N
         logger.info("  %-40s %10d 行  %8.1fs  %s", r["table"], r["rows"], r["time"], status)
     logger.info("=" * 60)
 
-    # 确定最终任务状态
     final_status = "completed"
     final_message = f"同步完成！共同步 {total_rows} 行，耗时 {total_elapsed:.1f} 秒"
     if errors:

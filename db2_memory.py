@@ -582,7 +582,14 @@ class DB2MemoryStore:
             self._mark_dirty()
 
     def convert_pipeline_to_configs(self, pipeline_id: str) -> Optional[List[Dict]]:
-        """将流水线配置转换为同步配置列表，支持 1:1/1:N/N:1/N:M 全部基数。"""
+        """将流水线配置转换为同步配置列表，支持 1:1/1:N/N:1/N:M 全部基数。
+
+        多源/多目标场景处理策略：
+        - 1:1 每条连接独立生成一个同步配置
+        - 1:N 同一源节点的多条1:N连接，按连接拆分为多个同步任务
+        - N:1 同一目标节点的多条N:1连接，合并为一个多源同步配置
+        - N:M 每条连接按1:N方式拆分
+        """
         pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             return None
@@ -594,9 +601,91 @@ class DB2MemoryStore:
             return None
 
         node_map = {n["id"]: n for n in nodes}
+
+        base_sync = {
+            "parallel_tables": pipeline.get("config", {}).get("parallel_tables", 4),
+            "chunk_size": pipeline.get("config", {}).get("chunk_size", 50000),
+            "batch_insert_size": pipeline.get("config", {}).get("batch_insert_size", 5000),
+        }
+
+        processed_conn_ids = set()
         configs = []
 
+        n1_groups = {}
         for conn in connections:
+            if conn.get("cardinality") == "N:1":
+                to_id = conn.get("to")
+                if to_id not in n1_groups:
+                    n1_groups[to_id] = []
+                n1_groups[to_id].append(conn)
+
+        for to_id, group_conns in n1_groups.items():
+            if len(group_conns) < 2:
+                continue
+            for conn in group_conns:
+                processed_conn_ids.add(conn.get("id"))
+
+            to_node = node_map.get(to_id)
+            if not to_node:
+                continue
+            target_resource = self.get_resource(to_node.get("resourceId"))
+            if not target_resource:
+                continue
+            tgt_cfg = self._make_resource_cfg(target_resource)
+
+            all_source_tables = []
+            all_field_mappings = {}
+            source_cfgs = []
+
+            for conn in group_conns:
+                from_node = node_map.get(conn.get("from"))
+                if not from_node:
+                    continue
+                source_resource = self.get_resource(from_node.get("resourceId"))
+                if not source_resource:
+                    continue
+
+                src_cfg = self._make_resource_cfg(source_resource)
+                source_cfgs.append(src_cfg)
+
+                table_mappings = conn.get("tableMappings", [])
+                if table_mappings:
+                    for tm in table_mappings:
+                        st = tm.get("sourceTable", "")
+                        tt = tm.get("targetTable", "")
+                        if st:
+                            all_source_tables.append(st)
+                            fm = tm.get("fieldMappings", [])
+                            if tt and fm:
+                                all_field_mappings[st] = {
+                                    "targetTable": tt,
+                                    "mappings": [
+                                        {"source": m.get("source"), "target": m.get("target")}
+                                        for m in fm
+                                    ]
+                                }
+                else:
+                    node_tables = from_node.get("tables", [])
+                    all_source_tables.extend(node_tables)
+
+            if not source_cfgs:
+                continue
+
+            primary_src = source_cfgs[0]
+            sync = {**base_sync, "tables": all_source_tables}
+            if all_field_mappings:
+                sync["fieldMappings"] = all_field_mappings
+            if len(source_cfgs) > 1:
+                sync["multiSource"] = source_cfgs
+
+            cfg = {"source": primary_src, "target": tgt_cfg, "sync": sync}
+            configs.append(cfg)
+
+        for conn in connections:
+            conn_id = conn.get("id")
+            if conn_id in processed_conn_ids:
+                continue
+
             from_node = node_map.get(conn.get("from"))
             to_node = node_map.get(conn.get("to"))
             if not from_node or not to_node:
@@ -609,12 +698,6 @@ class DB2MemoryStore:
             target_resource = self.get_resource(to_node.get("resourceId"))
             if not source_resource or not target_resource:
                 continue
-
-            base_sync = {
-                "parallel_tables": pipeline.get("config", {}).get("parallel_tables", 4),
-                "chunk_size": pipeline.get("config", {}).get("chunk_size", 50000),
-                "batch_insert_size": pipeline.get("config", {}).get("batch_insert_size", 5000),
-            }
 
             if cardinality == "1:1":
                 cfg = self._build_1to1_config(

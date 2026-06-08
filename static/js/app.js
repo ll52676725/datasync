@@ -1776,7 +1776,7 @@ function renderCanvas() {
                     </svg>
                 </div>
                 <span class="canvas-node-title">${node.name}</span>
-                <span class="canvas-node-type-badge">${node.nodeType === 'source' ? '源' : '目标'}</span>
+                <span class="canvas-node-type-badge">${node.nodeType === 'source' ? '源' : node.nodeType === 'both' ? '中转' : '目标'}</span>
             </div>
             <div class="canvas-node-body">
                 <span class="canvas-node-db">${DB_TYPE_LABELS[node.type] || node.type}</span>
@@ -2069,11 +2069,8 @@ function addConnection(fromNodeId, toNodeId, cardinality) {
         cardinality: cardinality || '1:1',
         tableMappings: [],
     });
-    
-    const fromNode = canvasNodes.find(n => n.id === fromNodeId);
-    const toNode = canvasNodes.find(n => n.id === toNodeId);
-    if (fromNode) fromNode.nodeType = 'source';
-    if (toNode) toNode.nodeType = 'target';
+
+    _refreshNodeTypes();
     
     renderCanvas();
     showToast(`${CARDINALITY_LABELS[cardinality || '1:1']}连接已建立`, 'success');
@@ -2081,6 +2078,19 @@ function addConnection(fromNodeId, toNodeId, cardinality) {
     if (cardinality && cardinality !== '1:1') {
         openTableMappingModal(connectionId);
     }
+}
+
+function _refreshNodeTypes() {
+    canvasNodes.forEach(n => { n.nodeType = 'source'; });
+    canvasConnections.forEach(c => {
+        const toNode = canvasNodes.find(n => n.id === c.to);
+        if (toNode) toNode.nodeType = 'target';
+    });
+    canvasNodes.forEach(n => {
+        const hasOutgoing = canvasConnections.some(c => c.from === n.id);
+        const hasIncoming = canvasConnections.some(c => c.to === n.id);
+        if (hasOutgoing && hasIncoming) n.nodeType = 'both';
+    });
 }
 
 function selectConnection(connId) {
@@ -2093,6 +2103,7 @@ function selectConnection(connId) {
 function deleteConnection(connId) {
     canvasConnections = canvasConnections.filter(c => c.id !== connId);
     selectedConnection = null;
+    _refreshNodeTypes();
     renderCanvas();
     renderInspector();
     showToast('连接已删除', 'info');
@@ -2325,7 +2336,7 @@ function renderConnectionInspector(body) {
                 <div class="inspector-conn-flow">
                     <div class="inspector-conn-node">
                         <span class="inspector-conn-node-name">${fromNode ? fromNode.name : '未知'}</span>
-                        <span class="inspector-conn-node-type">${fromNode ? (fromNode.nodeType === 'source' ? '源' : '目标') : ''}</span>
+                        <span class="inspector-conn-node-type">${fromNode ? (fromNode.nodeType === 'source' ? '源' : fromNode.nodeType === 'both' ? '中转' : '目标') : ''}</span>
                     </div>
                     <div class="inspector-conn-arrow" style="color: ${color};">
                         <svg width="32" height="16" viewBox="0 0 32 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="0" y1="8" x2="24" y2="8"></line><polyline points="20 3 26 8 20 13"></polyline></svg>
@@ -2333,7 +2344,7 @@ function renderConnectionInspector(body) {
                     </div>
                     <div class="inspector-conn-node">
                         <span class="inspector-conn-node-name">${toNode ? toNode.name : '未知'}</span>
-                        <span class="inspector-conn-node-type">${toNode ? (toNode.nodeType === 'source' ? '源' : '目标') : ''}</span>
+                        <span class="inspector-conn-node-type">${toNode ? (toNode.nodeType === 'source' ? '源' : toNode.nodeType === 'both' ? '中转' : '目标') : ''}</span>
                     </div>
                 </div>
             </div>
@@ -2486,6 +2497,7 @@ function openNodeConfig(nodeId) {
             <select id="configNodeType">
                 <option value="source" ${node.nodeType === 'source' ? 'selected' : ''}>源数据库（读取数据）</option>
                 <option value="target" ${node.nodeType === 'target' ? 'selected' : ''}>目标数据库（写入数据）</option>
+                <option value="both" ${node.nodeType === 'both' ? 'selected' : ''}>中转（既是源又是目标）</option>
             </select>
         </div>
         <div class="form-group">

@@ -24,8 +24,132 @@
       "created_by": "admin",
       "created_at": "2026-06-07T08:46:28.384667",
       "updated_at": "2026-06-07T08:46:28.384667"
+    },
+    "r1": {
+      "id": "r1",
+      "type": "mysql",
+      "host": "10.0.0.1",
+      "port": 3306,
+      "user": "root",
+      "password": "p",
+      "database": "da"
+    },
+    "r2": {
+      "id": "r2",
+      "type": "mysql",
+      "host": "10.0.0.2",
+      "port": 3306,
+      "user": "root",
+      "password": "p",
+      "database": "db"
+    },
+    "r3": {
+      "id": "r3",
+      "type": "db2",
+      "host": "10.0.0.3",
+      "port": 50000,
+      "user": "db2",
+      "password": "p",
+      "database": "dc"
     }
   },
-  "pipelines": {},
-  "persisted_at": "2026-06-07T08:46:28.385566"
+  "pipelines": {
+    "p1": {
+      "pipeline_id": "p1",
+      "name": "t",
+      "description": "",
+      "nodes": [
+        {
+          "id": "n1",
+          "resourceId": "r1",
+          "type": "mysql",
+          "name": "A",
+          "nodeType": "source",
+          "tables": [
+            "users",
+            "orders"
+          ]
+        },
+        {
+          "id": "n2",
+          "resourceId": "r2",
+          "type": "mysql",
+          "name": "B",
+          "nodeType": "source",
+          "tables": [
+            "products"
+          ]
+        },
+        {
+          "id": "n3",
+          "resourceId": "r3",
+          "type": "db2",
+          "name": "C",
+          "nodeType": "target",
+          "tables": []
+        }
+      ],
+      "connections": [
+        {
+          "id": "c1",
+          "from": "n1",
+          "to": "n3",
+          "cardinality": "N:1",
+          "tableMappings": []
+        },
+        {
+          "id": "c2",
+          "from": "n2",
+          "to": "n3",
+          "cardinality": "N:1",
+          "tableMappings": []
+        }
+      ],
+      "config": {},
+      "created_by": "admin",
+      "created_at": "2026-06-08T23:11:58.069785",
+      "updated_at": "2026-06-08T23:11:58.069785",
+      "status": "idle"
+    },
+    "p2": {
+      "pipeline_id": "p2",
+      "name": "single_n1",
+      "description": "",
+      "nodes": [
+        {
+          "id": "n1",
+          "resourceId": "r1",
+          "type": "mysql",
+          "name": "A",
+          "nodeType": "source",
+          "tables": [
+            "users"
+          ]
+        },
+        {
+          "id": "n3",
+          "resourceId": "r3",
+          "type": "db2",
+          "name": "C",
+          "nodeType": "target",
+          "tables": []
+        }
+      ],
+      "connections": [
+        {
+          "id": "c1",
+          "from": "n1",
+          "to": "n3",
+          "cardinality": "N:1",
+          "tableMappings": []
+        }
+      ],
+      "config": {},
+      "created_by": "admin",
+      "created_at": "2026-06-08T23:12:27.678238",
+      "updated_at": "2026-06-08T23:12:27.678238",
+      "status": "idle"
+    }
+  },
+  "persisted_at": "2026-06-08T23:12:27.678238"
 }
