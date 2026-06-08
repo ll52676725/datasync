@@ -1415,25 +1415,17 @@ svg.canvas-connections {
     overflow: visible;
 }
 
-.canvas-connections path {
-    fill: none;
-    stroke: #6366f1;
-    stroke-width: 3;
-    pointer-events: stroke;
-    cursor: pointer;
-    filter: drop-shadow(0 1px 2px rgba(99, 102, 241, 0.3));
-}
-
-.canvas-connections path:hover {
-    stroke: var(--primary-700);
-    stroke-width: 3;
+.canvas-connections g {
+    pointer-events: auto;
 }
 
 .canvas-connections path.temp {
+    fill: none;
     stroke: #818cf8;
     stroke-width: 3;
     stroke-dasharray: 8 4;
     opacity: 0.9;
+    pointer-events: none;
     filter: drop-shadow(0 1px 3px rgba(129, 140, 248, 0.4));
 }
 
@@ -2440,4 +2432,240 @@ svg.canvas-connections {
     .db-type-selector {
         grid-template-columns: 1fr;
     }
+}
+
+.canvas-node-conn-count {
+    font-size: 11px;
+    color: var(--primary-500);
+    font-weight: 600;
+    margin-left: 8px;
+}
+
+.canvas-node-type-badge {
+    font-size: 10px;
+    font-weight: 600;
+    padding: 1px 6px;
+    border-radius: 4px;
+    background: rgba(255, 255, 255, 0.25);
+    white-space: nowrap;
+}
+
+.cardinality-info {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 16px;
+    padding: 16px 20px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-lg);
+    font-weight: 600;
+    font-size: 14px;
+    color: var(--text-primary);
+}
+
+.cardinality-info svg {
+    color: var(--primary-500);
+    flex-shrink: 0;
+}
+
+.cardinality-selector {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+}
+
+.cardinality-option {
+    cursor: pointer;
+}
+
+.cardinality-option input {
+    display: none;
+}
+
+.cardinality-card {
+    padding: 12px;
+    border: 2px solid var(--border-color);
+    border-radius: var(--radius-md);
+    text-align: center;
+    transition: all var(--transition-fast);
+    background: var(--bg-tertiary);
+}
+
+.cardinality-option:hover .cardinality-card {
+    border-color: var(--primary-300);
+    background: var(--primary-50);
+}
+
+.cardinality-option input:checked + .cardinality-card {
+    border-color: var(--primary-500);
+    background: var(--primary-50);
+    box-shadow: 0 0 0 3px rgba(99, 102, 241, 0.1);
+}
+
+.cardinality-visual {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+    margin-bottom: 6px;
+}
+
+.cardinality-visual span:nth-child(1),
+.cardinality-visual span:nth-child(3) {
+    font-weight: 800;
+    font-size: 18px;
+    font-family: monospace;
+    color: var(--primary-500);
+}
+
+.cardinality-visual span:nth-child(2) {
+    font-size: 16px;
+    color: var(--text-secondary);
+}
+
+.cardinality-label {
+    display: block;
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    margin-bottom: 2px;
+}
+
+.cardinality-desc {
+    display: block;
+    font-size: 11px;
+    color: var(--text-secondary);
+}
+
+.inspector-connections-list {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.inspector-conn-item {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 8px 10px;
+    background: var(--bg-tertiary);
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.inspector-conn-item:hover {
+    background: var(--primary-50);
+}
+
+.inspector-conn-info {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.inspector-conn-direction {
+    font-size: 14px;
+    font-weight: 700;
+    color: var(--primary-500);
+}
+
+.inspector-conn-name {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text-primary);
+}
+
+.inspector-conn-badge {
+    font-size: 11px;
+    font-weight: 700;
+    padding: 2px 8px;
+    border-radius: 4px;
+    font-family: monospace;
+}
+
+.inspector-conn-detail {
+    margin-top: 4px;
+}
+
+.inspector-conn-flow {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    justify-content: center;
+}
+
+.inspector-conn-node {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    min-width: 60px;
+}
+
+.inspector-conn-node-name {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text-primary);
+    text-align: center;
+    word-break: break-all;
+}
+
+.inspector-conn-node-type {
+    font-size: 10px;
+    color: var(--text-muted);
+}
+
+.inspector-conn-arrow {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    flex-shrink: 0;
+}
+
+.inspector-cardinality-options {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 8px;
+}
+
+.inspector-cardinality-btn {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 2px;
+    padding: 10px 8px;
+    border: 2px solid var(--border-color);
+    border-radius: var(--radius-sm);
+    background: transparent;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+    font-family: inherit;
+}
+
+.inspector-cardinality-btn:hover {
+    background: var(--bg-tertiary);
+}
+
+.inspector-cardinality-btn.active {
+    box-shadow: 0 0 0 2px rgba(99, 102, 241, 0.1);
+}
+
+.selected-tables-list {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 4px;
+    margin-top: 8px;
+}
+
+.table-tag {
+    display: inline-flex;
+    align-items: center;
+    padding: 2px 8px;
+    background: var(--primary-50);
+    color: var(--primary-700);
+    border-radius: 4px;
+    font-size: 11px;
+    font-weight: 500;
 }

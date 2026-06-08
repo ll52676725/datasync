@@ -1583,9 +1583,11 @@ async function deleteResource(resourceId) {
 let canvasNodes = [];
 let canvasConnections = [];
 let selectedNode = null;
+let selectedConnection = null;
 let isDragging = false;
 let isConnecting = false;
 let connectingFrom = null;
+let pendingConnection = null;
 let tempConnectionLine = null;
 let dragOffset = { x: 0, y: 0 };
 let nodeIdCounter = 0;
@@ -1676,12 +1678,18 @@ function initCanvasEvents() {
     canvasArea.addEventListener('click', function(e) {
         if (e.target === this || e.target.classList.contains('canvas-connections') || e.target.classList.contains('canvas-nodes')) {
             selectNode(null);
+            selectConnection(null);
         }
     });
 
     document.addEventListener('keydown', function(e) {
-        if (e.key === 'Delete' && selectedNode && currentTab === 'canvas') {
-            deleteCanvasNode(selectedNode.id);
+        if (currentTab !== 'canvas') return;
+        if (e.key === 'Delete') {
+            if (selectedConnection) {
+                deleteConnection(selectedConnection);
+            } else if (selectedNode) {
+                deleteCanvasNode(selectedNode);
+            }
         }
     });
 }
@@ -1705,11 +1713,57 @@ function addCanvasNode(resourceId, resourceType, resourceName, x, y) {
     updateCanvasEmptyState();
 }
 
+function getConnectionEndpoints(conn) {
+    const fromNode = canvasNodes.find(n => n.id === conn.from);
+    const toNode = canvasNodes.find(n => n.id === conn.to);
+    if (!fromNode || !toNode) return null;
+
+    const nodeHeight = 80;
+    const nodeWidth = 200;
+
+    const fromOutgoing = canvasConnections.filter(c => c.from === conn.from);
+    const toIncoming = canvasConnections.filter(c => c.to === conn.to);
+    const fromIdx = fromOutgoing.indexOf(conn);
+    const toIdx = toIncoming.indexOf(conn);
+    const fromTotal = fromOutgoing.length;
+    const toTotal = toIncoming.length;
+
+    const fromSpacing = Math.min(25, nodeHeight / (fromTotal + 1));
+    const toSpacing = Math.min(25, nodeHeight / (toTotal + 1));
+
+    const fromY = fromNode.y + (fromIdx + 1) * fromSpacing + 10;
+    const toY = toNode.y + (toIdx + 1) * toSpacing + 10;
+
+    return {
+        x1: fromNode.x + nodeWidth,
+        y1: fromY,
+        x2: toNode.x,
+        y2: toY
+    };
+}
+
+const CARDINALITY_COLORS = {
+    '1:1': '#6366f1',
+    '1:N': '#10b981',
+    'N:1': '#f59e0b',
+    'N:M': '#ef4444'
+};
+
+const CARDINALITY_LABELS = {
+    '1:1': '一对一',
+    '1:N': '一对多',
+    'N:1': '多对一',
+    'N:M': '多对多'
+};
+
 function renderCanvas() {
     const nodesContainer = document.getElementById('canvasNodes');
     const connectionsContainer = document.getElementById('canvasConnections');
 
-    nodesContainer.innerHTML = canvasNodes.map(node => `
+    nodesContainer.innerHTML = canvasNodes.map(node => {
+        const outCount = canvasConnections.filter(c => c.from === node.id).length;
+        const inCount = canvasConnections.filter(c => c.to === node.id).length;
+        return `
         <div class="canvas-node ${selectedNode === node.id ? 'selected' : ''}" 
              data-node-id="${node.id}"
              style="left: ${node.x}px; top: ${node.y}px;">
@@ -1727,32 +1781,128 @@ function renderCanvas() {
             <div class="canvas-node-body">
                 <span class="canvas-node-db">${DB_TYPE_LABELS[node.type] || node.type}</span>
                 ${node.tables.length > 0 ? `<span class="canvas-node-tables">${node.tables.length} 张表</span>` : ''}
+                ${(outCount > 0 || inCount > 0) ? `<span class="canvas-node-conn-count">入${inCount} 出${outCount}</span>` : ''}
             </div>
             <div class="canvas-node-port port-input" data-node-id="${node.id}" data-port-type="input" title="输入端口"></div>
             <div class="canvas-node-port port-output" data-node-id="${node.id}" data-port-type="output" title="输出端口"></div>
         </div>
-    `).join('');
+    `}).join('');
 
     const svgNS = "http://www.w3.org/2000/svg";
     connectionsContainer.innerHTML = '';
-    
+
     canvasConnections.forEach(conn => {
-        const fromNode = canvasNodes.find(n => n.id === conn.from);
-        const toNode = canvasNodes.find(n => n.id === conn.to);
-        if (fromNode && toNode) {
-            const x1 = fromNode.x + 200;
-            const y1 = fromNode.y + 50;
-            const x2 = toNode.x;
-            const y2 = toNode.y + 50;
-            
-            const line = document.createElementNS(svgNS, 'path');
-            const midX = (x1 + x2) / 2;
-            const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
-            line.setAttribute('d', d);
-            line.setAttribute('class', 'connection-line');
-            line.setAttribute('data-connection-id', conn.id);
-            connectionsContainer.appendChild(line);
+        const endpoints = getConnectionEndpoints(conn);
+        if (!endpoints) return;
+
+        const { x1, y1, x2, y2 } = endpoints;
+        const color = CARDINALITY_COLORS[conn.cardinality] || '#6366f1';
+        const isSelected = selectedConnection === conn.id;
+
+        const g = document.createElementNS(svgNS, 'g');
+        g.setAttribute('data-connection-id', conn.id);
+        g.style.cursor = 'pointer';
+
+        const hitArea = document.createElementNS(svgNS, 'path');
+        const dx = x2 - x1;
+        const controlOffset = Math.min(Math.abs(dx) * 0.5, 150);
+        const midX1 = x1 + controlOffset;
+        const midX2 = x2 - controlOffset;
+        const d = `M ${x1} ${y1} C ${midX1} ${y1}, ${midX2} ${y2}, ${x2} ${y2}`;
+        hitArea.setAttribute('d', d);
+        hitArea.setAttribute('stroke', 'transparent');
+        hitArea.setAttribute('stroke-width', '16');
+        hitArea.setAttribute('fill', 'none');
+        hitArea.style.pointerEvents = 'stroke';
+        g.appendChild(hitArea);
+
+        const line = document.createElementNS(svgNS, 'path');
+        line.setAttribute('d', d);
+        line.setAttribute('stroke', color);
+        line.setAttribute('stroke-width', isSelected ? '3.5' : '2.5');
+        line.setAttribute('fill', 'none');
+        line.setAttribute('stroke-linecap', 'round');
+        line.style.pointerEvents = 'none';
+        line.style.filter = isSelected
+            ? `drop-shadow(0 0 6px ${color}80)`
+            : `drop-shadow(0 1px 2px ${color}30)`;
+        if (isSelected) {
+            line.setAttribute('stroke-dasharray', '8 4');
         }
+        g.appendChild(line);
+
+        const arrowSize = 8;
+        const angle = Math.atan2(y2 - (y2 + y1) / 2, x2 - midX2);
+        const arrowX1 = x2 - arrowSize * Math.cos(angle - Math.PI / 6);
+        const arrowY1 = y2 - arrowSize * Math.sin(angle - Math.PI / 6);
+        const arrowX2 = x2 - arrowSize * Math.cos(angle + Math.PI / 6);
+        const arrowY2 = y2 - arrowSize * Math.sin(angle + Math.PI / 6);
+        const arrow = document.createElementNS(svgNS, 'polygon');
+        arrow.setAttribute('points', `${x2},${y2} ${arrowX1},${arrowY1} ${arrowX2},${arrowY2}`);
+        arrow.setAttribute('fill', color);
+        arrow.style.pointerEvents = 'none';
+        g.appendChild(arrow);
+
+        const cardinality = conn.cardinality || '1:1';
+        const parts = cardinality.split(':');
+
+        const srcLabel = document.createElementNS(svgNS, 'text');
+        srcLabel.setAttribute('x', x1 + 16);
+        srcLabel.setAttribute('y', y1 - 8);
+        srcLabel.setAttribute('fill', color);
+        srcLabel.setAttribute('font-size', '12');
+        srcLabel.setAttribute('font-weight', '700');
+        srcLabel.setAttribute('font-family', 'monospace');
+        srcLabel.style.pointerEvents = 'none';
+        srcLabel.textContent = parts[0];
+        g.appendChild(srcLabel);
+
+        const tgtLabel = document.createElementNS(svgNS, 'text');
+        tgtLabel.setAttribute('x', x2 - 24);
+        tgtLabel.setAttribute('y', y2 - 8);
+        tgtLabel.setAttribute('fill', color);
+        tgtLabel.setAttribute('font-size', '12');
+        tgtLabel.setAttribute('font-weight', '700');
+        tgtLabel.setAttribute('font-family', 'monospace');
+        tgtLabel.style.pointerEvents = 'none';
+        tgtLabel.textContent = parts[1];
+        g.appendChild(tgtLabel);
+
+        const midX = (x1 + x2) / 2;
+        const midY = (y1 + y2) / 2;
+        const typeLabel = document.createElementNS(svgNS, 'text');
+        typeLabel.setAttribute('x', midX);
+        typeLabel.setAttribute('y', midY - 10);
+        typeLabel.setAttribute('fill', color);
+        typeLabel.setAttribute('font-size', '11');
+        typeLabel.setAttribute('font-weight', '600');
+        typeLabel.setAttribute('text-anchor', 'middle');
+        typeLabel.setAttribute('font-family', '-apple-system, sans-serif');
+        typeLabel.style.pointerEvents = 'none';
+        typeLabel.style.background = 'white';
+        typeLabel.textContent = CARDINALITY_LABELS[cardinality] || cardinality;
+        g.appendChild(typeLabel);
+
+        const bg = document.createElementNS(svgNS, 'rect');
+        const textLen = (CARDINALITY_LABELS[cardinality] || cardinality).length * 7 + 12;
+        bg.setAttribute('x', midX - textLen / 2);
+        bg.setAttribute('y', midY - 22);
+        bg.setAttribute('width', textLen);
+        bg.setAttribute('height', 18);
+        bg.setAttribute('rx', '4');
+        bg.setAttribute('fill', 'white');
+        bg.setAttribute('fill-opacity', '0.85');
+        bg.setAttribute('stroke', color);
+        bg.setAttribute('stroke-width', '1');
+        bg.style.pointerEvents = 'none';
+        g.insertBefore(bg, typeLabel);
+
+        g.addEventListener('click', function(e) {
+            e.stopPropagation();
+            selectConnection(conn.id);
+        });
+
+        connectionsContainer.appendChild(g);
     });
 
     if (isConnecting && tempConnectionLine) {
@@ -1784,11 +1934,14 @@ function initGlobalCanvasEvents() {
             const fromNode = canvasNodes.find(n => n.id === connectingFrom.nodeId);
             if (fromNode) {
                 const x1 = fromNode.x + 200;
-                const y1 = fromNode.y + 50;
+                const y1 = fromNode.y + 40;
                 const x2 = e.clientX - rect.left + canvasArea.scrollLeft;
                 const y2 = e.clientY - rect.top + canvasArea.scrollTop;
-                const midX = (x1 + x2) / 2;
-                const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+                const dx = x2 - x1;
+                const controlOffset = Math.min(Math.abs(dx) * 0.5, 150);
+                const midX1 = x1 + controlOffset;
+                const midX2 = x2 - controlOffset;
+                const d = `M ${x1} ${y1} C ${midX1} ${y1}, ${midX2} ${y2}, ${x2} ${y2}`;
                 tempConnectionLine.setAttribute('d', d);
             }
         }
@@ -1799,41 +1952,39 @@ function initGlobalCanvasEvents() {
 
         if (isConnecting && connectingFrom) {
             const target = e.target;
-            let connected = false;
-            
+            let toNodeId = null;
+
             if (target.classList.contains('canvas-node-port') && target.dataset.portType === 'input') {
-                const toNodeId = target.dataset.nodeId;
-                if (connectingFrom.nodeId !== toNodeId) {
-                    addConnection(connectingFrom.nodeId, toNodeId);
-                    connected = true;
-                }
+                toNodeId = target.dataset.nodeId;
+            } else if (target.classList.contains('canvas-node') || target.closest('.canvas-node')) {
+                const nodeEl = target.classList.contains('canvas-node') ? target : target.closest('.canvas-node');
+                toNodeId = nodeEl.dataset.nodeId;
             }
-            
-            if (!connected) {
-                const canvasArea = document.getElementById('canvasArea');
-                const rect = canvasArea.getBoundingClientRect();
-                const mouseX = e.clientX - rect.left + canvasArea.scrollLeft;
-                const mouseY = e.clientY - rect.top + canvasArea.scrollTop;
-                
-                let nearestPort = null;
-                let minDistance = 30;
-                
-                document.querySelectorAll('.canvas-node-port[data-port-type="input"]').forEach(port => {
-                    const nodeId = port.dataset.nodeId;
-                    const node = canvasNodes.find(n => n.id === nodeId);
-                    if (node && nodeId !== connectingFrom.nodeId) {
-                        const portX = node.x;
-                        const portY = node.y + 50;
-                        const distance = Math.sqrt(Math.pow(mouseX - portX, 2) + Math.pow(mouseY - portY, 2));
-                        if (distance < minDistance) {
-                            minDistance = distance;
-                            nearestPort = nodeId;
-                        }
+
+            if (!toNodeId) {
+                const area = document.getElementById('canvasArea');
+                const rect = area.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left + area.scrollLeft;
+                const mouseY = e.clientY - rect.top + area.scrollTop;
+
+                let minDistance = 50;
+                canvasNodes.forEach(node => {
+                    if (node.id === connectingFrom.nodeId) return;
+                    const centerX = node.x + 100;
+                    const centerY = node.y + 40;
+                    const distance = Math.sqrt(Math.pow(mouseX - centerX, 2) + Math.pow(mouseY - centerY, 2));
+                    if (distance < minDistance) {
+                        minDistance = distance;
+                        toNodeId = node.id;
                     }
                 });
-                
-                if (nearestPort) {
-                    addConnection(connectingFrom.nodeId, nearestPort);
+            }
+
+            if (toNodeId && connectingFrom.nodeId !== toNodeId) {
+                const exists = canvasConnections.some(c => c.from === connectingFrom.nodeId && c.to === toNodeId);
+                if (!exists) {
+                    pendingConnection = { from: connectingFrom.nodeId, to: toNodeId };
+                    showCardinalityModal(connectingFrom.nodeId, toNodeId);
                 }
             }
         }
@@ -1885,7 +2036,12 @@ function initNodeEvents() {
                 
                 const svgNS = "http://www.w3.org/2000/svg";
                 tempConnectionLine = document.createElementNS(svgNS, 'path');
-                tempConnectionLine.setAttribute('class', 'connection-line temp');
+                tempConnectionLine.setAttribute('class', 'temp');
+                tempConnectionLine.setAttribute('fill', 'none');
+                tempConnectionLine.setAttribute('stroke', '#818cf8');
+                tempConnectionLine.setAttribute('stroke-width', '3');
+                tempConnectionLine.setAttribute('stroke-dasharray', '8 4');
+                tempConnectionLine.setAttribute('stroke-linecap', 'round');
                 document.getElementById('canvasConnections').appendChild(tempConnectionLine);
             }
         });
@@ -1901,7 +2057,7 @@ function cancelConnecting() {
     }
 }
 
-function addConnection(fromNodeId, toNodeId) {
+function addConnection(fromNodeId, toNodeId, cardinality) {
     const exists = canvasConnections.some(c => c.from === fromNodeId && c.to === toNodeId);
     if (exists) return;
 
@@ -1910,6 +2066,7 @@ function addConnection(fromNodeId, toNodeId) {
         id: connectionId,
         from: fromNodeId,
         to: toNodeId,
+        cardinality: cardinality || '1:1',
     });
     
     const fromNode = canvasNodes.find(n => n.id === fromNodeId);
@@ -1918,11 +2075,66 @@ function addConnection(fromNodeId, toNodeId) {
     if (toNode) toNode.nodeType = 'target';
     
     renderCanvas();
-    showToast('连接已建立', 'success');
+    showToast(`${CARDINALITY_LABELS[cardinality || '1:1']}连接已建立`, 'success');
+}
+
+function selectConnection(connId) {
+    selectedConnection = connId;
+    if (connId) selectedNode = null;
+    renderCanvas();
+    renderInspector();
+}
+
+function deleteConnection(connId) {
+    canvasConnections = canvasConnections.filter(c => c.id !== connId);
+    selectedConnection = null;
+    renderCanvas();
+    renderInspector();
+    showToast('连接已删除', 'info');
+}
+
+function updateConnectionCardinality(connId, newCardinality) {
+    const conn = canvasConnections.find(c => c.id === connId);
+    if (conn) {
+        conn.cardinality = newCardinality;
+        renderCanvas();
+        renderInspector();
+        showToast(`关联类型已更新为${CARDINALITY_LABELS[newCardinality]}`, 'success');
+    }
+}
+
+function showCardinalityModal(fromNodeId, toNodeId) {
+    const fromNode = canvasNodes.find(n => n.id === fromNodeId);
+    const toNode = canvasNodes.find(n => n.id === toNodeId);
+    if (!fromNode || !toNode) return;
+
+    document.getElementById('cardinalityFromName').textContent = fromNode.name;
+    document.getElementById('cardinalityToName').textContent = toNode.name;
+
+    const defaultRadio = document.querySelector('input[name="cardinality"][value="1:1"]');
+    if (defaultRadio) defaultRadio.checked = true;
+
+    document.getElementById('cardinalityModal').classList.add('active');
+}
+
+function closeCardinalityModal() {
+    document.getElementById('cardinalityModal').classList.remove('active');
+    pendingConnection = null;
+}
+
+function confirmCardinality() {
+    if (!pendingConnection) return;
+
+    const selected = document.querySelector('input[name="cardinality"]:checked');
+    const cardinality = selected ? selected.value : '1:1';
+
+    addConnection(pendingConnection.from, pendingConnection.to, cardinality);
+    closeCardinalityModal();
 }
 
 function selectNode(nodeId) {
     selectedNode = nodeId;
+    if (nodeId) selectedConnection = null;
     renderCanvas();
     renderInspector();
 }
@@ -1931,6 +2143,7 @@ function deleteCanvasNode(nodeId) {
     canvasNodes = canvasNodes.filter(n => n.id !== nodeId);
     canvasConnections = canvasConnections.filter(c => c.from !== nodeId && c.to !== nodeId);
     if (selectedNode === nodeId) selectedNode = null;
+    selectedConnection = null;
     renderCanvas();
     renderInspector();
     showToast('节点已删除', 'info');
@@ -1952,6 +2165,7 @@ function clearCanvas() {
     canvasNodes = [];
     canvasConnections = [];
     selectedNode = null;
+    selectedConnection = null;
     renderCanvas();
     renderInspector();
     showToast('画布已清空', 'info');
@@ -1965,7 +2179,7 @@ function autoLayout() {
     const otherNodes = canvasNodes.filter(n => !sourceNodes.includes(n) && !targetNodes.includes(n));
     
     const startX = 100;
-    const startY = 100;
+    const startY = 80;
     const spacingY = 120;
     
     sourceNodes.forEach((node, index) => {
@@ -1974,12 +2188,12 @@ function autoLayout() {
     });
     
     targetNodes.forEach((node, index) => {
-        node.x = startX + 400;
+        node.x = startX + 450;
         node.y = startY + index * spacingY;
     });
     
     otherNodes.forEach((node, index) => {
-        node.x = startX + 200;
+        node.x = startX + 225;
         node.y = startY + (sourceNodes.length + index) * spacingY;
     });
     
@@ -1990,6 +2204,11 @@ function autoLayout() {
 function renderInspector() {
     const body = document.getElementById('inspectorBody');
     
+    if (selectedConnection) {
+        renderConnectionInspector(body);
+        return;
+    }
+
     if (!selectedNode) {
         body.innerHTML = `
             <div class="inspector-empty">
@@ -1997,7 +2216,7 @@ function renderInspector() {
                     <circle cx="12" cy="12" r="3"></circle>
                     <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1 0 2.83 2 2 0 0 1-2.83 0l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-2 2 2 2 0 0 1-2-2v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83 0 2 2 0 0 1 0-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1-2-2 2 2 0 0 1 2-2h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 0-2.83 2 2 0 0 1 2.83 0l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 2-2 2 2 0 0 1 2 2v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 0 2 2 0 0 1 0 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 2 2 2 2 0 0 1-2 2h-.09a1.65 1.65 0 0 0-1.51 1z"></path>
                 </svg>
-                <p>选中节点查看属性</p>
+                <p>选中节点或连线查看属性</p>
             </div>
         `;
         return;
@@ -2005,6 +2224,8 @@ function renderInspector() {
 
     const node = canvasNodes.find(n => n.id === selectedNode);
     if (!node) return;
+
+    const nodeConns = canvasConnections.filter(c => c.from === node.id || c.to === node.id);
 
     body.innerHTML = `
         <div class="inspector-section">
@@ -2026,6 +2247,28 @@ function renderInspector() {
             </div>
         </div>
         <div class="inspector-section">
+            <h5>关联关系 (${nodeConns.length})</h5>
+            ${nodeConns.length > 0 ? `
+                <div class="inspector-connections-list">
+                    ${nodeConns.map(conn => {
+                        const isFrom = conn.from === node.id;
+                        const otherNode = canvasNodes.find(n => n.id === (isFrom ? conn.to : conn.from));
+                        const card = conn.cardinality || '1:1';
+                        const color = CARDINALITY_COLORS[card] || '#6366f1';
+                        return `
+                            <div class="inspector-conn-item" onclick="selectConnection('${conn.id}')" style="border-left: 3px solid ${color};">
+                                <div class="inspector-conn-info">
+                                    <span class="inspector-conn-direction">${isFrom ? '→' : '←'}</span>
+                                    <span class="inspector-conn-name">${otherNode ? otherNode.name : '未知'}</span>
+                                </div>
+                                <span class="inspector-conn-badge" style="background: ${color}20; color: ${color};">${card}</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            ` : '<p style="font-size: 12px; color: var(--text-muted);">暂无关联关系</p>'}
+        </div>
+        <div class="inspector-section">
             <h5>同步配置</h5>
             <button class="btn-secondary btn-sm btn-block" onclick="loadNodeTables('${node.id}')">
                 ${node.tables.length > 0 ? `已选择 ${node.tables.length} 张表` : '选择同步表'}
@@ -2040,6 +2283,67 @@ function renderInspector() {
             <h5>操作</h5>
             <button class="btn-secondary btn-sm btn-block" onclick="openNodeConfig('${node.id}')">详细配置</button>
             <button class="btn-danger btn-sm btn-block" onclick="deleteCanvasNode('${node.id}')">删除节点</button>
+        </div>
+    `;
+}
+
+function renderConnectionInspector(body) {
+    const conn = canvasConnections.find(c => c.id === selectedConnection);
+    if (!conn) {
+        body.innerHTML = `<div class="inspector-empty"><p>连线不存在</p></div>`;
+        return;
+    }
+
+    const fromNode = canvasNodes.find(n => n.id === conn.from);
+    const toNode = canvasNodes.find(n => n.id === conn.to);
+    const card = conn.cardinality || '1:1';
+    const color = CARDINALITY_COLORS[card] || '#6366f1';
+    const label = CARDINALITY_LABELS[card] || card;
+
+    body.innerHTML = `
+        <div class="inspector-section">
+            <h5 style="display: flex; align-items: center; gap: 8px;">
+                <span style="width: 10px; height: 10px; border-radius: 50%; background: ${color};"></span>
+                关联关系
+            </h5>
+            <div class="inspector-conn-detail">
+                <div class="inspector-conn-flow">
+                    <div class="inspector-conn-node">
+                        <span class="inspector-conn-node-name">${fromNode ? fromNode.name : '未知'}</span>
+                        <span class="inspector-conn-node-type">${fromNode ? (fromNode.nodeType === 'source' ? '源' : '目标') : ''}</span>
+                    </div>
+                    <div class="inspector-conn-arrow" style="color: ${color};">
+                        <svg width="32" height="16" viewBox="0 0 32 16" fill="none" stroke="currentColor" stroke-width="2"><line x1="0" y1="8" x2="24" y2="8"></line><polyline points="20 3 26 8 20 13"></polyline></svg>
+                        <span style="font-size: 11px; font-weight: 700; color: ${color};">${card}</span>
+                    </div>
+                    <div class="inspector-conn-node">
+                        <span class="inspector-conn-node-name">${toNode ? toNode.name : '未知'}</span>
+                        <span class="inspector-conn-node-type">${toNode ? (toNode.nodeType === 'source' ? '源' : '目标') : ''}</span>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="inspector-section">
+            <h5>关联类型</h5>
+            <div class="inspector-cardinality-options">
+                ${['1:1', '1:N', 'N:1', 'N:M'].map(c => {
+                    const cColor = CARDINALITY_COLORS[c];
+                    const cLabel = CARDINALITY_LABELS[c];
+                    const isActive = card === c;
+                    return `
+                        <button class="inspector-cardinality-btn ${isActive ? 'active' : ''}"
+                                style="border-color: ${isActive ? cColor : 'var(--border-color)'}; background: ${isActive ? cColor + '15' : 'transparent'};"
+                                onclick="updateConnectionCardinality('${conn.id}', '${c}')">
+                            <span style="color: ${cColor}; font-weight: 700; font-size: 13px;">${c}</span>
+                            <span style="font-size: 11px;">${cLabel}</span>
+                        </button>
+                    `;
+                }).join('')}
+            </div>
+        </div>
+        <div class="inspector-section">
+            <h5>操作</h5>
+            <button class="btn-danger btn-sm btn-block" onclick="deleteConnection('${conn.id}')">删除连接</button>
         </div>
     `;
 }
@@ -2253,7 +2557,7 @@ async function loadPipelines() {
                 </div>
                 <div class="pipeline-info">
                     <h4>${pipeline.name}</h4>
-                    <span class="pipeline-meta">${pipeline.nodes?.length || 0} 个节点 · ${pipeline.connections?.length || 0} 个连接</span>
+                    <span class="pipeline-meta">${pipeline.nodes?.length || 0} 个节点 · ${pipeline.connections?.length || 0} 个关联</span>
                 </div>
                 <span class="status-badge status-${pipeline.status || 'idle'}">${getStatusLabel(pipeline.status)}</span>
             </div>
@@ -2294,9 +2598,16 @@ async function editPipelineInCanvas(pipelineId) {
 
     const pipeline = data.pipeline;
     canvasNodes = pipeline.nodes || [];
-    canvasConnections = pipeline.connections || [];
+    canvasConnections = (pipeline.connections || []).map(c => ({
+        ...c,
+        cardinality: c.cardinality || '1:1',
+    }));
     selectedNode = null;
-    nodeIdCounter = canvasNodes.length;
+    selectedConnection = null;
+    nodeIdCounter = canvasNodes.reduce((max, n) => {
+        const num = parseInt(n.id.replace('node_', ''), 10);
+        return isNaN(num) ? max : Math.max(max, num);
+    }, 0);
     
     switchTab('canvas');
     setTimeout(() => {
