@@ -2778,3 +2778,164 @@ svg.canvas-connections {
 .btn-xs:hover {
     opacity: 0.85;
 }
+
+/* ==========================================================
+   数据转换 Modal 样式 (条件过滤/脚本转换/聚合配置)
+   ========================================================== */
+
+.tabs {
+    display: flex;
+    gap: 4px;
+    background: var(--bg-tertiary);
+    padding: 4px;
+    border-radius: var(--radius-md);
+    border-bottom: none;
+}
+
+.tab {
+    flex: 1;
+    padding: 10px 14px;
+    text-align: center;
+    border-radius: var(--radius-sm);
+    cursor: pointer;
+    font-size: 14px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: all var(--transition-fast);
+    user-select: none;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 6px;
+}
+
+.tab:hover {
+    color: var(--text-primary);
+    background: var(--bg-secondary);
+}
+
+.tab.active {
+    background: var(--bg-secondary);
+    color: var(--primary-color);
+    box-shadow: var(--shadow-sm);
+}
+
+.tab-icon {
+    font-size: 16px;
+}
+
+.alert-warning {
+    background: #fff7ed;
+    border-left: 3px solid #f59e0b;
+    color: #92400e;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.alert-success {
+    background: #f0fdf4;
+    border-left: 3px solid #22c55e;
+    color: #166534;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.alert-error {
+    background: #fef2f2;
+    border-left: 3px solid #ef4444;
+    color: #991b1b;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.alert-info {
+    background: #eff6ff;
+    border-left: 3px solid #3b82f6;
+    color: #1e40af;
+    padding: 10px 14px;
+    border-radius: 6px;
+    font-size: 13px;
+}
+
+.column-chip {
+    display: inline-block;
+    padding: 2px 8px;
+    font-size: 11px;
+    background: var(--bg-input);
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    cursor: pointer;
+    transition: all var(--transition-fast);
+}
+
+.column-chip:hover {
+    background: var(--primary-50);
+    border-color: var(--primary-300);
+    color: var(--primary-color);
+}
+
+.agg-metric-row {
+    display: grid;
+    grid-template-columns: 1fr 140px 1fr 30px;
+    gap: 4px;
+    align-items: center;
+    padding: 6px;
+    background: var(--bg-secondary);
+    border-radius: 6px;
+}
+
+.agg-metric-row select,
+.agg-metric-row input[type="text"] {
+    padding: 5px 8px;
+    border: 1px solid var(--border-color);
+    border-radius: 4px;
+    font-size: 12px;
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    min-width: 0;
+}
+
+.agg-metric-row select:focus,
+.agg-metric-row input[type="text"]:focus {
+    border-color: var(--primary-500);
+    outline: none;
+    box-shadow: 0 0 0 2px var(--primary-100);
+}
+
+.badge {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 10px;
+    font-size: 10px;
+    font-weight: 600;
+}
+
+.badge-info { background: #3b82f6; color: #fff; }
+.badge-warning { background: #f59e0b; color: #fff; }
+.badge-success { background: #10b981; color: #fff; }
+.badge-danger { background: #ef4444; color: #fff; }
+
+#trCondition,
+#trRowScript {
+    width: 100%;
+    padding: 8px 10px;
+    font-family: Menlo, Consolas, monospace;
+    font-size: 13px;
+    border: 1px solid var(--border-color);
+    border-radius: 6px;
+    background: var(--bg-input);
+    color: var(--text-primary);
+    resize: vertical;
+    transition: border-color var(--transition-fast),
+                box-shadow var(--transition-fast);
+}
+
+#trCondition:focus,
+#trRowScript:focus {
+    border-color: var(--primary-500);
+    outline: none;
+    box-shadow: 0 0 0 2px var(--primary-100);
+}
