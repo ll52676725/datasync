@@ -860,6 +860,36 @@
             </div>
         </div>
     </div>
+
+    <div id="tableMappingModal" class="modal">
+        <div class="modal-content" style="max-width: 800px;">
+            <div class="modal-header">
+                <h3 id="tableMappingTitle">表映射编辑器</h3>
+                <button class="modal-close" onclick="closeTableMappingModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="tableMappingBody">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeTableMappingModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="saveTableMappings()">保存映射</button>
+            </div>
+        </div>
+    </div>
+
+    <div id="fieldMappingModal" class="modal">
+        <div class="modal-content" style="max-width: 600px;">
+            <div class="modal-header">
+                <h3 id="fieldMappingTitle">字段映射编辑器</h3>
+                <button class="modal-close" onclick="closeFieldMappingModal()">&times;</button>
+            </div>
+            <div class="modal-body" id="fieldMappingBody">
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="closeFieldMappingModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="saveFieldMappings()">保存字段映射</button>
+            </div>
+        </div>
+    </div>
     
     <div id="toast" class="toast"></div>
     

@@ -581,8 +581,8 @@ class DB2MemoryStore:
             })
             self._mark_dirty()
 
-    def convert_pipeline_to_config(self, pipeline_id: str) -> Optional[Dict]:
-        """将流水线配置转换为传统的同步配置格式。"""
+    def convert_pipeline_to_configs(self, pipeline_id: str) -> Optional[List[Dict]]:
+        """将流水线配置转换为同步配置列表，支持 1:1/1:N/N:1/N:M 全部基数。"""
         pipeline = self.get_pipeline(pipeline_id)
         if not pipeline:
             return None
@@ -590,49 +590,210 @@ class DB2MemoryStore:
         nodes = pipeline.get("nodes", [])
         connections = pipeline.get("connections", [])
 
-        source_nodes = [n for n in nodes if n.get("nodeType") == "source"]
-        target_nodes = [n for n in nodes if n.get("nodeType") == "target"]
-
-        if not source_nodes or not target_nodes:
+        if not nodes or not connections:
             return None
 
-        source_node = source_nodes[0]
-        target_node = target_nodes[0]
+        node_map = {n["id"]: n for n in nodes}
+        configs = []
 
-        source_resource = self.get_resource(source_node.get("resourceId"))
-        target_resource = self.get_resource(target_node.get("resourceId"))
+        for conn in connections:
+            from_node = node_map.get(conn.get("from"))
+            to_node = node_map.get(conn.get("to"))
+            if not from_node or not to_node:
+                continue
 
-        if not source_resource or not target_resource:
-            return None
+            cardinality = conn.get("cardinality", "1:1")
+            table_mappings = conn.get("tableMappings", [])
 
-        config = {
-            "source": {
-                "type": source_resource["type"],
-                "host": source_resource["host"],
-                "port": source_resource["port"],
-                "user": source_resource["user"],
-                "password": source_resource["password"],
-                "database": source_resource["database"],
-                "charset": "utf8mb4",
-            },
-            "target": {
-                "type": target_resource["type"],
-                "host": target_resource["host"],
-                "port": target_resource["port"],
-                "user": target_resource["user"],
-                "password": target_resource["password"],
-                "database": target_resource["database"],
-                "charset": "utf8mb4",
-            },
-            "sync": {
+            source_resource = self.get_resource(from_node.get("resourceId"))
+            target_resource = self.get_resource(to_node.get("resourceId"))
+            if not source_resource or not target_resource:
+                continue
+
+            base_sync = {
                 "parallel_tables": pipeline.get("config", {}).get("parallel_tables", 4),
                 "chunk_size": pipeline.get("config", {}).get("chunk_size", 50000),
                 "batch_insert_size": pipeline.get("config", {}).get("batch_insert_size", 5000),
-                "tables": source_node.get("tables", []),
-            },
+            }
+
+            if cardinality == "1:1":
+                cfg = self._build_1to1_config(
+                    from_node, to_node, source_resource, target_resource,
+                    table_mappings, base_sync
+                )
+                if cfg:
+                    configs.append(cfg)
+            elif cardinality == "1:N":
+                split_cfgs = self._build_1toN_config(
+                    from_node, to_node, source_resource, target_resource,
+                    table_mappings, base_sync
+                )
+                configs.extend(split_cfgs)
+            elif cardinality == "N:1":
+                merge_cfg = self._build_Nto1_config(
+                    from_node, to_node, source_resource, target_resource,
+                    table_mappings, base_sync
+                )
+                if merge_cfg:
+                    configs.append(merge_cfg)
+            elif cardinality == "N:M":
+                cross_cfgs = self._build_NtoM_config(
+                    from_node, to_node, source_resource, target_resource,
+                    table_mappings, base_sync
+                )
+                configs.extend(cross_cfgs)
+
+        return configs if configs else None
+
+    def _make_resource_cfg(self, resource: Dict) -> Dict:
+        return {
+            "type": resource["type"],
+            "host": resource["host"],
+            "port": resource["port"],
+            "user": resource["user"],
+            "password": resource["password"],
+            "database": resource["database"],
+            "charset": "utf8mb4",
         }
 
-        return config
+    def _build_1to1_config(self, from_node, to_node, src_res, tgt_res,
+                           table_mappings, base_sync):
+        src_cfg = self._make_resource_cfg(src_res)
+        tgt_cfg = self._make_resource_cfg(tgt_res)
+
+        if table_mappings:
+            field_map = table_mappings[0].get("fieldMappings", [])
+            tables = [table_mappings[0].get("sourceTable", "")]
+            if not tables[0]:
+                tables = from_node.get("tables", [])
+            sync = {**base_sync, "tables": tables}
+            if field_map:
+                sync["fieldMappings"] = {
+                    table_mappings[0].get("sourceTable", ""): {
+                        "targetTable": table_mappings[0].get("targetTable", ""),
+                        "mappings": [
+                            {"source": m.get("source"), "target": m.get("target")}
+                            for m in field_map
+                        ]
+                    }
+                }
+        else:
+            tables = from_node.get("tables", [])
+            sync = {**base_sync, "tables": tables}
+
+        return {"source": src_cfg, "target": tgt_cfg, "sync": sync}
+
+    def _build_1toN_config(self, from_node, to_node, src_res, tgt_res,
+                           table_mappings, base_sync):
+        src_cfg = self._make_resource_cfg(src_res)
+        tgt_cfg = self._make_resource_cfg(tgt_res)
+        results = []
+
+        if not table_mappings:
+            source_tables = from_node.get("tables", [])
+            for st in source_tables:
+                sync = {**base_sync, "tables": [st]}
+                results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
+            return results
+
+        for tm in table_mappings:
+            source_table = tm.get("sourceTable", "")
+            target_table = tm.get("targetTable", "")
+            field_mappings = tm.get("fieldMappings", [])
+
+            if not source_table:
+                continue
+
+            sync = {**base_sync, "tables": [source_table]}
+            if target_table and field_mappings:
+                sync["fieldMappings"] = {
+                    source_table: {
+                        "targetTable": target_table,
+                        "mappings": [
+                            {"source": m.get("source"), "target": m.get("target")}
+                            for m in field_mappings
+                        ]
+                    }
+                }
+            results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
+
+        return results
+
+    def _build_Nto1_config(self, from_node, to_node, src_res, tgt_res,
+                           table_mappings, base_sync):
+        src_cfg = self._make_resource_cfg(src_res)
+        tgt_cfg = self._make_resource_cfg(tgt_res)
+
+        if not table_mappings:
+            tables = from_node.get("tables", [])
+            sync = {**base_sync, "tables": tables}
+            return {"source": src_cfg, "target": tgt_cfg, "sync": sync}
+
+        source_tables = []
+        merge_map = {}
+        for tm in table_mappings:
+            st = tm.get("sourceTable", "")
+            tt = tm.get("targetTable", "")
+            if st:
+                source_tables.append(st)
+                fm = tm.get("fieldMappings", [])
+                if tt and fm:
+                    merge_map[st] = {
+                        "targetTable": tt,
+                        "mappings": [
+                            {"source": m.get("source"), "target": m.get("target")}
+                            for m in fm
+                        ]
+                    }
+
+        sync = {**base_sync, "tables": source_tables}
+        if merge_map:
+            sync["fieldMappings"] = merge_map
+
+        return {"source": src_cfg, "target": tgt_cfg, "sync": sync}
+
+    def _build_NtoM_config(self, from_node, to_node, src_res, tgt_res,
+                           table_mappings, base_sync):
+        src_cfg = self._make_resource_cfg(src_res)
+        tgt_cfg = self._make_resource_cfg(tgt_res)
+        results = []
+
+        if not table_mappings:
+            source_tables = from_node.get("tables", [])
+            for st in source_tables:
+                sync = {**base_sync, "tables": [st]}
+                results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
+            return results
+
+        for tm in table_mappings:
+            source_table = tm.get("sourceTable", "")
+            target_table = tm.get("targetTable", "")
+            field_mappings = tm.get("fieldMappings", [])
+
+            if not source_table:
+                continue
+
+            sync = {**base_sync, "tables": [source_table]}
+            if target_table and field_mappings:
+                sync["fieldMappings"] = {
+                    source_table: {
+                        "targetTable": target_table,
+                        "mappings": [
+                            {"source": m.get("source"), "target": m.get("target")}
+                            for m in field_mappings
+                        ]
+                    }
+                }
+            results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
+
+        return results
+
+    def convert_pipeline_to_config(self, pipeline_id: str) -> Optional[Dict]:
+        """兼容旧接口：返回第一个同步配置（1:1 简单场景）。"""
+        configs = self.convert_pipeline_to_configs(pipeline_id)
+        if configs:
+            return configs[0]
+        return None
 
 
 db2_store = DB2MemoryStore()

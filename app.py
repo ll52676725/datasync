@@ -980,6 +980,38 @@ def get_resource_tables(resource_id):
         logger.error("获取表列表失败: %s", e)
         return jsonify({"success": False, "message": f"获取表列表失败: {str(e)}"}), 500
 
+@app.route("/api/resources/<resource_id>/tables/<table_name>/columns", methods=["GET"])
+@login_required
+def get_resource_table_columns(resource_id, table_name):
+    """获取资源数据库中指定表的字段列表。"""
+    resource = db2_store.get_resource(resource_id)
+    if not resource:
+        return jsonify({"success": False, "message": "资源不存在"}), 404
+
+    try:
+        adapter = get_adapter(resource)
+        conn = adapter.create_connection()
+        try:
+            schema = adapter.get_table_schema(conn, table_name)
+        finally:
+            adapter.close_connection(conn)
+
+        columns = []
+        for col in schema.columns:
+            columns.append({
+                "name": col.name,
+                "data_type": col.data_type,
+                "nullable": col.nullable,
+                "is_primary_key": col.is_primary_key,
+                "default_value": col.default_value,
+                "comment": col.comment,
+            })
+        logger.info("获取表字段列表: %s/%s, %d 个字段", resource_id, table_name, len(columns))
+        return jsonify({"success": True, "columns": columns})
+    except Exception as e:
+        logger.error("获取表字段列表失败: %s", e)
+        return jsonify({"success": False, "message": f"获取表字段列表失败: {str(e)}"}), 500
+
 # ====================================================================== #
 #                           流水线管理 API
 # ====================================================================== #
@@ -1038,49 +1070,62 @@ def delete_pipeline(pipeline_id):
 @app.route("/api/pipelines/<pipeline_id>/start", methods=["POST"])
 @login_required
 def start_pipeline(pipeline_id):
-    """从流水线启动同步任务。"""
+    """从流水线启动同步任务，支持 1:1/1:N/N:1/N:M 全部基数。"""
     pipeline = db2_store.get_pipeline(pipeline_id)
     if not pipeline:
         return jsonify({"success": False, "message": "流水线不存在"}), 404
 
-    config = db2_store.convert_pipeline_to_config(pipeline_id)
-    if not config:
+    configs = db2_store.convert_pipeline_to_configs(pipeline_id)
+    if not configs:
         return jsonify({"success": False, "message": "流水线配置不完整，无法启动"}), 400
-
-    config_name = f"pipeline_{pipeline['name']}_{pipeline_id[:8]}"
-    db2_store.save_config(config_name, config, request.username)
 
     data = request.get_json() or {}
     mode = data.get("mode", "resume")
 
-    task_id = str(uuid.uuid4())
-    task = db2_store.create_task(task_id, config_name, request.username, mode)
+    task_ids = []
+    for i, config in enumerate(configs):
+        suffix = f"_part{i}" if len(configs) > 1 else ""
+        config_name = f"pipeline_{pipeline['name']}_{pipeline_id[:8]}{suffix}"
+        db2_store.save_config(config_name, config, request.username)
+
+        task_id = str(uuid.uuid4())
+        task = db2_store.create_task(task_id, config_name, request.username, mode)
+
+        stop_flag = {"stop": False}
+        task_stop_flags[task_id] = stop_flag
+
+        current_config = config
+
+        def sync_worker(cfg=current_config, tid=task_id, pid=pipeline_id):
+            try:
+                run_sync(cfg, resume_mode=(mode == "resume"), restart=(mode == "restart"),
+                         task_id=tid, stop_flag=task_stop_flags.get(tid, {"stop": False}))
+                db2_store.update_pipeline_status(pid, "completed", "同步完成")
+            except Exception as e:
+                logger.error("流水线任务 %s 失败: %s", tid, e)
+                db2_store.update_task(tid, status="failed", message=f"任务失败: {str(e)}")
+                db2_store.update_pipeline_status(pid, "failed", f"同步失败: {str(e)}")
+            finally:
+                if tid in running_tasks:
+                    del running_tasks[tid]
+                if tid in task_stop_flags:
+                    del task_stop_flags[tid]
+
+        thread = threading.Thread(target=sync_worker, daemon=True)
+        running_tasks[task_id] = thread
+        thread.start()
+        task_ids.append(task_id)
+
     db2_store.update_pipeline_status(pipeline_id, "running", "同步任务已启动")
 
-    stop_flag = {"stop": False}
-    task_stop_flags[task_id] = stop_flag
-
-    def sync_worker():
-        try:
-            run_sync(config, resume_mode=(mode == "resume"), restart=(mode == "restart"),
-                     task_id=task_id, stop_flag=stop_flag)
-            db2_store.update_pipeline_status(pipeline_id, "completed", "同步完成")
-        except Exception as e:
-            logger.error("流水线任务 %s 失败: %s", task_id, e)
-            db2_store.update_task(task_id, status="failed", message=f"任务失败: {str(e)}")
-            db2_store.update_pipeline_status(pipeline_id, "failed", f"同步失败: {str(e)}")
-        finally:
-            if task_id in running_tasks:
-                del running_tasks[task_id]
-            if task_id in task_stop_flags:
-                del task_stop_flags[task_id]
-
-    thread = threading.Thread(target=sync_worker, daemon=True)
-    running_tasks[task_id] = thread
-    thread.start()
-
-    logger.info("流水线任务已启动: %s (流水线: %s, 用户: %s)", task_id, pipeline_id, request.username)
-    return jsonify({"success": True, "message": "同步任务已启动", "task_id": task_id})
+    logger.info("流水线任务已启动: %s (流水线: %s, 子任务: %d, 用户: %s)",
+                task_ids[0], pipeline_id, len(task_ids), request.username)
+    return jsonify({
+        "success": True,
+        "message": f"同步任务已启动，共 {len(task_ids)} 个子任务",
+        "task_id": task_ids[0],
+        "task_ids": task_ids,
+    })
 
 # ====================================================================== #
 #                        更新仪表盘 API 支持新数据模型

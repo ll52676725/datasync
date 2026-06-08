@@ -2067,6 +2067,7 @@ function addConnection(fromNodeId, toNodeId, cardinality) {
         from: fromNodeId,
         to: toNodeId,
         cardinality: cardinality || '1:1',
+        tableMappings: [],
     });
     
     const fromNode = canvasNodes.find(n => n.id === fromNodeId);
@@ -2076,6 +2077,10 @@ function addConnection(fromNodeId, toNodeId, cardinality) {
     
     renderCanvas();
     showToast(`${CARDINALITY_LABELS[cardinality || '1:1']}连接已建立`, 'success');
+
+    if (cardinality && cardinality !== '1:1') {
+        openTableMappingModal(connectionId);
+    }
 }
 
 function selectConnection(connId) {
@@ -2096,10 +2101,17 @@ function deleteConnection(connId) {
 function updateConnectionCardinality(connId, newCardinality) {
     const conn = canvasConnections.find(c => c.id === connId);
     if (conn) {
+        const oldCard = conn.cardinality;
         conn.cardinality = newCardinality;
+        if (oldCard !== newCardinality) {
+            conn.tableMappings = [];
+        }
         renderCanvas();
         renderInspector();
         showToast(`关联类型已更新为${CARDINALITY_LABELS[newCardinality]}`, 'success');
+        if (newCardinality !== '1:1' && oldCard !== newCardinality) {
+            setTimeout(() => openTableMappingModal(connId), 300);
+        }
     }
 }
 
@@ -2300,6 +2312,9 @@ function renderConnectionInspector(body) {
     const color = CARDINALITY_COLORS[card] || '#6366f1';
     const label = CARDINALITY_LABELS[card] || card;
 
+    const tableMappings = conn.tableMappings || [];
+    const mappingCount = tableMappings.length;
+
     body.innerHTML = `
         <div class="inspector-section">
             <h5 style="display: flex; align-items: center; gap: 8px;">
@@ -2340,6 +2355,29 @@ function renderConnectionInspector(body) {
                     `;
                 }).join('')}
             </div>
+        </div>
+        <div class="inspector-section">
+            <h5>表映射 (${mappingCount})</h5>
+            ${mappingCount > 0 ? `
+                <div class="inspector-mappings-list">
+                    ${tableMappings.map((tm, idx) => {
+                        const srcT = tm.sourceTable || '?';
+                        const tgtT = tm.targetTable || '?';
+                        const fCnt = (tm.fieldMappings || []).length;
+                        return `
+                            <div class="inspector-mapping-item" style="border-left: 3px solid ${color};">
+                                <span class="mapping-src">${srcT}</span>
+                                <span class="mapping-arrow">→</span>
+                                <span class="mapping-tgt">${tgtT}</span>
+                                <span class="mapping-fields">${fCnt}字段</span>
+                            </div>
+                        `;
+                    }).join('')}
+                </div>
+            ` : '<p style="font-size: 12px; color: var(--text-muted);">暂未配置表映射</p>'}
+            <button class="btn-secondary btn-sm btn-block" style="margin-top: 8px;" onclick="openTableMappingModal('${conn.id}')">
+                ${mappingCount > 0 ? '编辑表映射' : '配置表映射'}
+            </button>
         </div>
         <div class="inspector-section">
             <h5>操作</h5>
@@ -2490,6 +2528,292 @@ function closeNodeConfigModal() {
     currentConfigNodeId = null;
 }
 
+let currentMappingConnId = null;
+let currentFieldMappingIdx = null;
+let tempTableMappings = [];
+let sourceTableList = [];
+let targetTableList = [];
+
+async function openTableMappingModal(connId) {
+    const conn = canvasConnections.find(c => c.id === connId);
+    if (!conn) return;
+
+    currentMappingConnId = connId;
+    const fromNode = canvasNodes.find(n => n.id === conn.from);
+    const toNode = canvasNodes.find(n => n.id === conn.to);
+    const card = conn.cardinality || '1:1';
+    const color = CARDINALITY_COLORS[card] || '#6366f1';
+
+    document.getElementById('tableMappingTitle').textContent =
+        `表映射编辑器 - ${fromNode ? fromNode.name : '?'} → ${toNode ? toNode.name : '?'} (${CARDINALITY_LABELS[card]})`;
+
+    tempTableMappings = JSON.parse(JSON.stringify(conn.tableMappings || []));
+
+    showToast('正在加载表列表...', 'info');
+    const [srcData, tgtData] = await Promise.all([
+        apiRequest(`/api/resources/${fromNode.resourceId}/tables`),
+        apiRequest(`/api/resources/${toNode.resourceId}/tables`)
+    ]);
+
+    sourceTableList = (srcData && srcData.success) ? srcData.tables : [];
+    targetTableList = (tgtData && tgtData.success) ? tgtData.tables : [];
+
+    renderTableMappingBody(card, color);
+    document.getElementById('tableMappingModal').classList.add('active');
+}
+
+function renderTableMappingBody(card, color) {
+    const body = document.getElementById('tableMappingBody');
+    const cardLabel = CARDINALITY_LABELS[card] || card;
+
+    let addBtnHtml = '';
+    if (card === '1:N') {
+        addBtnHtml = `<button class="btn-secondary btn-sm" onclick="add1toNMapping()">+ 添加拆分映射（1源表→1目标表）</button>`;
+    } else if (card === 'N:1') {
+        addBtnHtml = `<button class="btn-secondary btn-sm" onclick="addNto1Mapping()">+ 添加合并映射（1源表→同1目标表）</button>`;
+    } else if (card === 'N:M') {
+        addBtnHtml = `<button class="btn-secondary btn-sm" onclick="addNto_MMapping()">+ 添加交叉映射</button>`;
+    } else {
+        addBtnHtml = `<button class="btn-secondary btn-sm" onclick="add1to1Mapping()">+ 添加表映射</button>`;
+    }
+
+    body.innerHTML = `
+        <div style="margin-bottom: 12px; display: flex; align-items: center; gap: 8px;">
+            <span style="background: ${color}20; color: ${color}; padding: 2px 10px; border-radius: 4px; font-weight: 600; font-size: 12px;">${card} ${cardLabel}</span>
+            <span style="font-size: 12px; color: var(--text-muted);">配置源表到目标表的映射关系</span>
+        </div>
+        <div class="table-mapping-list" id="tableMappingList">
+            ${tempTableMappings.length === 0 ? `
+                <div class="mapping-empty">
+                    <p>暂未配置表映射，请点击下方按钮添加</p>
+                </div>
+            ` : tempTableMappings.map((tm, idx) => {
+                const srcT = tm.sourceTable || '';
+                const tgtT = tm.targetTable || '';
+                const fCnt = (tm.fieldMappings || []).length;
+                return `
+                    <div class="table-mapping-row">
+                        <div class="mapping-row-fields">
+                            <select class="mapping-select" onchange="updateTempMapping(${idx}, 'sourceTable', this.value)">
+                                <option value="">选择源表</option>
+                                ${sourceTableList.map(t => `<option value="${t}" ${t === srcT ? 'selected' : ''}>${t}</option>`).join('')}
+                            </select>
+                            <span class="mapping-row-arrow">→</span>
+                            <select class="mapping-select" onchange="updateTempMapping(${idx}, 'targetTable', this.value)"
+                                    ${card === 'N:1' ? '' : ''}>
+                                <option value="">选择目标表</option>
+                                ${targetTableList.map(t => `<option value="${t}" ${t === tgtT ? 'selected' : ''}>${t}</option>`).join('')}
+                            </select>
+                            <button class="btn-secondary btn-xs" onclick="openFieldMappingModal(${idx})" title="编辑字段映射">
+                                ${fCnt > 0 ? `${fCnt}字段` : '字段映射'}
+                            </button>
+                            <button class="btn-danger btn-xs" onclick="removeTempMapping(${idx})" title="删除">✕</button>
+                        </div>
+                    </div>
+                `;
+            }).join('')}
+        </div>
+        <div style="margin-top: 12px;">
+            ${addBtnHtml}
+        </div>
+    `;
+}
+
+function add1to1Mapping() {
+    tempTableMappings.push({ sourceTable: '', targetTable: '', fieldMappings: [] });
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    renderTableMappingBody(conn ? (conn.cardinality || '1:1') : '1:1',
+        CARDINALITY_COLORS[conn ? (conn.cardinality || '1:1') : '1:1'] || '#6366f1');
+}
+
+function add1toNMapping() {
+    tempTableMappings.push({ sourceTable: '', targetTable: '', fieldMappings: [] });
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    renderTableMappingBody(conn ? (conn.cardinality || '1:N') : '1:N',
+        CARDINALITY_COLORS[conn ? (conn.cardinality || '1:N') : '1:N'] || '#10b981');
+}
+
+function addNto1Mapping() {
+    const existingTarget = tempTableMappings.length > 0 ? tempTableMappings[0].targetTable : '';
+    tempTableMappings.push({ sourceTable: '', targetTable: existingTarget, fieldMappings: [] });
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    renderTableMappingBody(conn ? (conn.cardinality || 'N:1') : 'N:1',
+        CARDINALITY_COLORS[conn ? (conn.cardinality || 'N:1') : 'N:1'] || '#f59e0b');
+}
+
+function addNto_MMapping() {
+    tempTableMappings.push({ sourceTable: '', targetTable: '', fieldMappings: [] });
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    renderTableMappingBody(conn ? (conn.cardinality || 'N:M') : 'N:M',
+        CARDINALITY_COLORS[conn ? (conn.cardinality || 'N:M') : 'N:M'] || '#ef4444');
+}
+
+function updateTempMapping(idx, field, value) {
+    if (idx >= 0 && idx < tempTableMappings.length) {
+        tempTableMappings[idx][field] = value;
+        const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+        if (conn && conn.cardinality === 'N:1' && field === 'targetTable') {
+            tempTableMappings.forEach(tm => { tm.targetTable = value; });
+        }
+        renderTableMappingBody(conn.cardinality || '1:1',
+            CARDINALITY_COLORS[conn.cardinality || '1:1'] || '#6366f1');
+    }
+}
+
+function removeTempMapping(idx) {
+    tempTableMappings.splice(idx, 1);
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    renderTableMappingBody(conn.cardinality || '1:1',
+        CARDINALITY_COLORS[conn.cardinality || '1:1'] || '#6366f1');
+}
+
+function saveTableMappings() {
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    if (!conn) return;
+
+    const validMappings = tempTableMappings.filter(tm => tm.sourceTable);
+    conn.tableMappings = validMappings;
+    closeTableMappingModal();
+    renderCanvas();
+    renderInspector();
+    showToast(`表映射已保存 (${validMappings.length} 条)`, 'success');
+}
+
+function closeTableMappingModal() {
+    document.getElementById('tableMappingModal').classList.remove('active');
+    currentMappingConnId = null;
+}
+
+let tempFieldMappings = [];
+let sourceColumnList = [];
+let targetColumnList = [];
+
+async function openFieldMappingModal(mappingIdx) {
+    if (mappingIdx < 0 || mappingIdx >= tempTableMappings.length) return;
+
+    currentFieldMappingIdx = mappingIdx;
+    const tm = tempTableMappings[mappingIdx];
+
+    if (!tm.sourceTable || !tm.targetTable) {
+        showToast('请先选择源表和目标表', 'error');
+        return;
+    }
+
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    const fromNode = canvasNodes.find(n => n.id === conn.from);
+    const toNode = canvasNodes.find(n => n.id === conn.to);
+
+    document.getElementById('fieldMappingTitle').textContent =
+        `字段映射: ${tm.sourceTable} → ${tm.targetTable}`;
+
+    tempFieldMappings = JSON.parse(JSON.stringify(tm.fieldMappings || []));
+
+    showToast('正在加载字段列表...', 'info');
+    const [srcColData, tgtColData] = await Promise.all([
+        apiRequest(`/api/resources/${fromNode.resourceId}/tables/${tm.sourceTable}/columns`),
+        apiRequest(`/api/resources/${toNode.resourceId}/tables/${tm.targetTable}/columns`)
+    ]);
+
+    sourceColumnList = (srcColData && srcColData.success) ? srcColData.columns : [];
+    targetColumnList = (tgtColData && tgtColData.success) ? tgtColData.columns : [];
+
+    if (tempFieldMappings.length === 0 && sourceColumnList.length > 0) {
+        sourceColumnList.forEach(sc => {
+            const matchTarget = targetColumnList.find(tc => tc.name.toLowerCase() === sc.name.toLowerCase());
+            if (matchTarget) {
+                tempFieldMappings.push({ source: sc.name, target: matchTarget.name });
+            }
+        });
+    }
+
+    renderFieldMappingBody();
+    document.getElementById('fieldMappingModal').classList.add('active');
+}
+
+function renderFieldMappingBody() {
+    const body = document.getElementById('fieldMappingBody');
+
+    body.innerHTML = `
+        <div style="display: grid; grid-template-columns: 1fr 40px 1fr; gap: 4px; align-items: center; margin-bottom: 8px; font-weight: 600; font-size: 12px; color: var(--text-secondary);">
+            <span>源字段</span>
+            <span></span>
+            <span>目标字段</span>
+        </div>
+        <div class="field-mapping-list" id="fieldMappingList">
+            ${tempFieldMappings.map((fm, idx) => `
+                <div class="field-mapping-row">
+                    <select class="mapping-select" onchange="updateTempFieldMapping(${idx}, 'source', this.value)">
+                        <option value="">选择源字段</option>
+                        ${sourceColumnList.map(c => `<option value="${c.name}" ${c.name === fm.source ? 'selected' : ''}>${c.name} (${c.data_type})</option>`).join('')}
+                    </select>
+                    <span class="mapping-row-arrow">→</span>
+                    <select class="mapping-select" onchange="updateTempFieldMapping(${idx}, 'target', this.value)">
+                        <option value="">选择目标字段</option>
+                        ${targetColumnList.map(c => `<option value="${c.name}" ${c.name === fm.target ? 'selected' : ''}>${c.name} (${c.data_type})</option>`).join('')}
+                    </select>
+                    <button class="btn-danger btn-xs" onclick="removeTempFieldMapping(${idx})" title="删除">✕</button>
+                </div>
+            `).join('')}
+        </div>
+        <div style="margin-top: 12px; display: flex; gap: 8px;">
+            <button class="btn-secondary btn-sm" onclick="addFieldMapping()">+ 添加字段映射</button>
+            <button class="btn-secondary btn-sm" onclick="autoMatchFields()">自动匹配</button>
+        </div>
+        <div style="margin-top: 12px; padding: 8px; background: var(--bg-secondary); border-radius: 6px; font-size: 11px; color: var(--text-muted);">
+            源表: ${tempTableMappings[currentFieldMappingIdx]?.sourceTable || '?'} (${sourceColumnList.length} 字段) → 
+            目标表: ${tempTableMappings[currentFieldMappingIdx]?.targetTable || '?'} (${targetColumnList.length} 字段)
+        </div>
+    `;
+}
+
+function addFieldMapping() {
+    tempFieldMappings.push({ source: '', target: '' });
+    renderFieldMappingBody();
+}
+
+function autoMatchFields() {
+    tempFieldMappings = [];
+    sourceColumnList.forEach(sc => {
+        const matchTarget = targetColumnList.find(tc => tc.name.toLowerCase() === sc.name.toLowerCase());
+        if (matchTarget) {
+            tempFieldMappings.push({ source: sc.name, target: matchTarget.name });
+        }
+    });
+    renderFieldMappingBody();
+    showToast(`自动匹配了 ${tempFieldMappings.length} 个字段`, 'success');
+}
+
+function updateTempFieldMapping(idx, field, value) {
+    if (idx >= 0 && idx < tempFieldMappings.length) {
+        tempFieldMappings[idx][field] = value;
+    }
+}
+
+function removeTempFieldMapping(idx) {
+    tempFieldMappings.splice(idx, 1);
+    renderFieldMappingBody();
+}
+
+function saveFieldMappings() {
+    if (currentFieldMappingIdx === null) return;
+
+    const validMappings = tempFieldMappings.filter(fm => fm.source && fm.target);
+    tempTableMappings[currentFieldMappingIdx].fieldMappings = validMappings;
+    closeFieldMappingModal();
+
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    if (conn) {
+        renderTableMappingBody(conn.cardinality || '1:1',
+            CARDINALITY_COLORS[conn.cardinality || '1:1'] || '#6366f1');
+    }
+    showToast(`字段映射已保存 (${validMappings.length} 条)`, 'success');
+}
+
+function closeFieldMappingModal() {
+    document.getElementById('fieldMappingModal').classList.remove('active');
+    currentFieldMappingIdx = null;
+}
+
 async function savePipeline() {
     if (canvasNodes.length === 0) {
         showToast('请先添加节点到画布', 'error');
@@ -2601,6 +2925,7 @@ async function editPipelineInCanvas(pipelineId) {
     canvasConnections = (pipeline.connections || []).map(c => ({
         ...c,
         cardinality: c.cardinality || '1:1',
+        tableMappings: c.tableMappings || [],
     }));
     selectedNode = null;
     selectedConnection = null;
