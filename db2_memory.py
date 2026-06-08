@@ -590,8 +590,8 @@ class DB2MemoryStore:
         nodes = pipeline.get("nodes", [])
         connections = pipeline.get("connections", [])
 
-        source_nodes = [n for n in nodes if n.get("type") == "source"]
-        target_nodes = [n for n in nodes if n.get("type") == "target"]
+        source_nodes = [n for n in nodes if n.get("nodeType") == "source"]
+        target_nodes = [n for n in nodes if n.get("nodeType") == "target"]
 
         if not source_nodes or not target_nodes:
             return None
