@@ -1589,11 +1589,15 @@ let connectingFrom = null;
 let tempConnectionLine = null;
 let dragOffset = { x: 0, y: 0 };
 let nodeIdCounter = 0;
+let canvasEventsInitialized = false;
 
 function loadCanvas() {
     loadResourcePalette();
     renderCanvas();
-    initCanvasEvents();
+    if (!canvasEventsInitialized) {
+        initGlobalCanvasEvents();
+        canvasEventsInitialized = true;
+    }
 }
 
 async function loadResourcePalette() {
@@ -1751,12 +1755,99 @@ function renderCanvas() {
         }
     });
 
+    if (isConnecting && tempConnectionLine) {
+        connectionsContainer.appendChild(tempConnectionLine);
+    }
+
     initNodeEvents();
     updateCanvasEmptyState();
 }
 
+function initGlobalCanvasEvents() {
+    const canvasArea = document.getElementById('canvasArea');
+
+    document.addEventListener('mousemove', function(e) {
+        if (currentTab !== 'canvas') return;
+
+        if (isDragging && selectedNode) {
+            const rect = canvasArea.getBoundingClientRect();
+            const node = canvasNodes.find(n => n.id === selectedNode);
+            if (node) {
+                node.x = Math.max(0, e.clientX - rect.left - dragOffset.x + canvasArea.scrollLeft);
+                node.y = Math.max(0, e.clientY - rect.top - dragOffset.y + canvasArea.scrollTop);
+                renderCanvas();
+            }
+        }
+
+        if (isConnecting && tempConnectionLine && connectingFrom) {
+            const rect = canvasArea.getBoundingClientRect();
+            const fromNode = canvasNodes.find(n => n.id === connectingFrom.nodeId);
+            if (fromNode) {
+                const x1 = fromNode.x + 200;
+                const y1 = fromNode.y + 50;
+                const x2 = e.clientX - rect.left + canvasArea.scrollLeft;
+                const y2 = e.clientY - rect.top + canvasArea.scrollTop;
+                const midX = (x1 + x2) / 2;
+                const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
+                tempConnectionLine.setAttribute('d', d);
+            }
+        }
+    });
+
+    document.addEventListener('mouseup', function(e) {
+        if (currentTab !== 'canvas') return;
+
+        if (isConnecting && connectingFrom) {
+            const target = e.target;
+            let connected = false;
+            
+            if (target.classList.contains('canvas-node-port') && target.dataset.portType === 'input') {
+                const toNodeId = target.dataset.nodeId;
+                if (connectingFrom.nodeId !== toNodeId) {
+                    addConnection(connectingFrom.nodeId, toNodeId);
+                    connected = true;
+                }
+            }
+            
+            if (!connected) {
+                const canvasArea = document.getElementById('canvasArea');
+                const rect = canvasArea.getBoundingClientRect();
+                const mouseX = e.clientX - rect.left + canvasArea.scrollLeft;
+                const mouseY = e.clientY - rect.top + canvasArea.scrollTop;
+                
+                let nearestPort = null;
+                let minDistance = 30;
+                
+                document.querySelectorAll('.canvas-node-port[data-port-type="input"]').forEach(port => {
+                    const nodeId = port.dataset.nodeId;
+                    const node = canvasNodes.find(n => n.id === nodeId);
+                    if (node && nodeId !== connectingFrom.nodeId) {
+                        const portX = node.x;
+                        const portY = node.y + 50;
+                        const distance = Math.sqrt(Math.pow(mouseX - portX, 2) + Math.pow(mouseY - portY, 2));
+                        if (distance < minDistance) {
+                            minDistance = distance;
+                            nearestPort = nodeId;
+                        }
+                    }
+                });
+                
+                if (nearestPort) {
+                    addConnection(connectingFrom.nodeId, nearestPort);
+                }
+            }
+        }
+
+        isDragging = false;
+        cancelConnecting();
+    });
+}
+
 function initNodeEvents() {
     document.querySelectorAll('.canvas-node').forEach(node => {
+        if (node.dataset.eventsBound) return;
+        node.dataset.eventsBound = 'true';
+        
         const nodeId = node.dataset.nodeId;
 
         node.addEventListener('mousedown', function(e) {
@@ -1765,8 +1856,10 @@ function initNodeEvents() {
             isDragging = true;
             selectedNode = nodeId;
             const nodeData = canvasNodes.find(n => n.id === nodeId);
-            dragOffset.x = e.clientX - nodeData.x;
-            dragOffset.y = e.clientY - nodeData.y;
+            if (nodeData) {
+                dragOffset.x = e.clientX - nodeData.x;
+                dragOffset.y = e.clientY - nodeData.y;
+            }
             renderCanvas();
         });
 
@@ -1778,6 +1871,9 @@ function initNodeEvents() {
     });
 
     document.querySelectorAll('.canvas-node-port').forEach(port => {
+        if (port.dataset.eventsBound) return;
+        port.dataset.eventsBound = 'true';
+        
         port.addEventListener('mousedown', function(e) {
             e.stopPropagation();
             const nodeId = this.dataset.nodeId;
@@ -1793,50 +1889,6 @@ function initNodeEvents() {
                 document.getElementById('canvasConnections').appendChild(tempConnectionLine);
             }
         });
-
-        port.addEventListener('mouseup', function(e) {
-            e.stopPropagation();
-            if (isConnecting && connectingFrom && this.dataset.portType === 'input') {
-                const toNodeId = this.dataset.nodeId;
-                if (connectingFrom.nodeId !== toNodeId) {
-                    addConnection(connectingFrom.nodeId, toNodeId);
-                }
-            }
-            cancelConnecting();
-        });
-    });
-
-    document.addEventListener('mousemove', function(e) {
-        if (isDragging && selectedNode) {
-            const canvasArea = document.getElementById('canvasArea');
-            const rect = canvasArea.getBoundingClientRect();
-            const node = canvasNodes.find(n => n.id === selectedNode);
-            if (node) {
-                node.x = Math.max(0, e.clientX - rect.left - dragOffset.x + canvasArea.scrollLeft);
-                node.y = Math.max(0, e.clientY - rect.top - dragOffset.y + canvasArea.scrollTop);
-                renderCanvas();
-            }
-        }
-
-        if (isConnecting && tempConnectionLine && connectingFrom) {
-            const canvasArea = document.getElementById('canvasArea');
-            const rect = canvasArea.getBoundingClientRect();
-            const fromNode = canvasNodes.find(n => n.id === connectingFrom.nodeId);
-            if (fromNode) {
-                const x1 = fromNode.x + 200;
-                const y1 = fromNode.y + 50;
-                const x2 = e.clientX - rect.left + canvasArea.scrollLeft;
-                const y2 = e.clientY - rect.top + canvasArea.scrollTop;
-                const midX = (x1 + x2) / 2;
-                const d = `M ${x1} ${y1} C ${midX} ${y1}, ${midX} ${y2}, ${x2} ${y2}`;
-                tempConnectionLine.setAttribute('d', d);
-            }
-        }
-    });
-
-    document.addEventListener('mouseup', function() {
-        isDragging = false;
-        cancelConnecting();
     });
 }
 
