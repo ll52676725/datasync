@@ -21,7 +21,19 @@ from db2_memory import db2_store
 logger = logging.getLogger(__name__)
 
 
-def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False):
+def _rename_table_in_ddl(ddl: str, new_table_name: str) -> str:
+    """在 DDL 语句中替换表名。支持 CREATE TABLE `xxx` 和 CREATE TABLE xxx 两种格式。"""
+    import re
+    pattern = r'(CREATE\s+TABLE\s+(?:IF\s+NOT\s+EXISTS\s+)?)(`?\w+`?)'
+    match = re.search(pattern, ddl, re.IGNORECASE)
+    if match:
+        prefix = match.group(1)
+        return ddl[:match.start()] + prefix + f'`{new_table_name}`' + ddl[match.end():]
+    return ddl
+
+
+def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False,
+                        target_table_name=None):
     """
     确保目标数据库中存在与源表结构一致的表。
 
@@ -31,9 +43,11 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False):
     Args:
         src_cfg: 源数据库配置（需含 type 字段）
         tgt_cfg: 目标数据库配置（需含 type 字段）
-        table_name: 表名
+        table_name: 源表名
         resume_mode: 是否断点续传模式
+        target_table_name: 目标表名（为空时与源表同名）
     """
+    effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
     src_conn = src_adapter.create_connection()
@@ -43,45 +57,53 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False):
         logger.info("获取源表 %s 的 DDL (类型: %s → %s)",
                      table_name, src_adapter.db_type, tgt_adapter.db_type)
 
-        if not tgt_adapter.table_exists(tgt_conn, table_name):
+        if effective_target != table_name:
+            ddl = _rename_table_in_ddl(ddl, effective_target)
+
+        if not tgt_adapter.table_exists(tgt_conn, effective_target):
             tgt_adapter.create_table_from_ddl(tgt_conn, ddl)
-            logger.info("在目标库创建表: %s", table_name)
+            logger.info("在目标库创建表: %s (源: %s)", effective_target, table_name)
         elif not resume_mode:
-            tgt_adapter.truncate_table(tgt_conn, table_name)
-            logger.info("清空目标表: %s", table_name)
+            tgt_adapter.truncate_table(tgt_conn, effective_target)
+            logger.info("清空目标表: %s", effective_target)
         else:
-            logger.info("目标表 %s 已存在 (断点续传模式，保留数据)", table_name)
+            logger.info("目标表 %s 已存在 (断点续传模式，保留数据)", effective_target)
     finally:
         src_adapter.close_connection(src_conn)
         tgt_adapter.close_connection(tgt_conn)
 
 
 def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
-               resume_mode=False, task_id=None, stop_flag=None):
+               resume_mode=False, task_id=None, stop_flag=None,
+               target_table_name=None, field_mapping=None):
     """
     同步单张表（主键分块模式，Web 版本）。
 
     与 sync_engine.sync_table 的区别：
     - 进度跟踪使用 db2_memory 内存存储
     - 支持通过 stop_flag 中断同步
+    - 支持表名映射 (target_table_name) 和字段映射 (field_mapping)
 
     Args:
         src_cfg: 源数据库配置
         tgt_cfg: 目标数据库配置
-        table_name: 表名
+        table_name: 源表名
         chunk_size: 每个分块的主键范围大小
         batch_insert_size: 批量插入的行数
         resume_mode: 是否断点续传
         task_id: 任务 ID（用于内存存储关联）
         stop_flag: 停止标志字典 {"stop": True/False}
+        target_table_name: 目标表名（为空时与源表同名）
+        field_mapping: 字段映射列表 [{"source":"col1","target":"col2"}, ...]
 
     Returns:
         同步结果字典
     """
+    effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
-    logger.info("开始同步表: %s (源: %s → 目标: %s, resume=%s)",
-                table_name, src_adapter.db_type, tgt_adapter.db_type, resume_mode)
+    logger.info("开始同步表: %s → %s (源: %s → 目标: %s, resume=%s)",
+                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type, resume_mode)
     start_time = time.time()
 
     src_conn = src_adapter.create_connection(use_dict_cursor=True)
@@ -89,10 +111,23 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
     synced_rows = 0
 
     try:
-        columns = src_adapter.get_table_columns(src_conn, table_name)
-        if not columns:
+        src_columns = src_adapter.get_table_columns(src_conn, table_name)
+        if not src_columns:
             logger.warning("表 %s 无列信息，跳过", table_name)
             return {"table": table_name, "rows": 0, "time": 0, "error": "no columns"}
+
+        if field_mapping:
+            src_col_set = set(src_columns)
+            mapped_src_cols = [m["source"] for m in field_mapping if m.get("source") in src_col_set]
+            read_columns = mapped_src_cols if mapped_src_cols else src_columns
+            col_map = {m["source"]: m["target"] for m in field_mapping if m.get("source") and m.get("target")}
+            tgt_columns = [col_map.get(c, c) for c in read_columns]
+        else:
+            read_columns = src_columns
+            tgt_columns = src_columns
+            col_map = {}
+
+        columns = read_columns
 
         pk_col = src_adapter.get_primary_key(src_conn, table_name)
         if not pk_col:
@@ -103,6 +138,7 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
             tgt_adapter.close_connection(tgt_conn)
             return _sync_table_streaming(
                 src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
+                target_table_name=effective_target, field_mapping=field_mapping,
             )
 
         total_rows = src_adapter.get_table_row_count(src_conn, table_name)
@@ -168,13 +204,13 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
                     insert_batch.append(tuple(row[c] for c in columns))
 
                     if len(insert_batch) >= batch_insert_size:
-                        tgt_adapter.batch_insert(tgt_conn, table_name, columns, insert_batch)
+                        tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
                         synced_rows += len(insert_batch)
                         db2_store.update_progress(table_name, synced_rows, chunk_end)
                         insert_batch = []
 
                 if insert_batch:
-                    tgt_adapter.batch_insert(tgt_conn, table_name, columns, insert_batch)
+                    tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
                     synced_rows += len(insert_batch)
                     insert_batch = []
 
@@ -194,9 +230,9 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
         db2_store.mark_progress_done(table_name, synced_rows)
 
     except Exception as e:
-        logger.error("同步表 %s 出错: %s", table_name, e)
+        logger.error("同步表 %s → %s 出错: %s", table_name, effective_target, e)
         db2_store.mark_progress_failed(table_name, str(e))
-        return {"table": table_name, "rows": synced_rows, "time": time.time() - start_time, "error": str(e)}
+        return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": time.time() - start_time, "error": str(e)}
     finally:
         src_adapter.close_connection(src_conn)
         tgt_adapter.close_connection(tgt_conn)
@@ -204,30 +240,34 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
     elapsed = time.time() - start_time
     speed = synced_rows / elapsed if elapsed > 0 else 0
     logger.info(
-        "完成表 %s 同步: %d 行, 耗时 %.1fs (%.0f 行/s)",
-        table_name, synced_rows, elapsed, speed,
+        "完成表 %s → %s 同步: %d 行, 耗时 %.1fs (%.0f 行/s)",
+        table_name, effective_target, synced_rows, elapsed, speed,
     )
-    return {"table": table_name, "rows": synced_rows, "time": elapsed, "error": None}
+    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None}
 
 
-def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size):
+def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
+                         target_table_name=None, field_mapping=None):
     """
     流式同步（无主键回退方案，Web 版本）。
 
     Args:
         src_cfg: 源数据库配置
         tgt_cfg: 目标数据库配置
-        table_name: 表名
+        table_name: 源表名
         chunk_size: 每次读取的批量大小
         batch_insert_size: 批量插入的行数
+        target_table_name: 目标表名（为空时与源表同名）
+        field_mapping: 字段映射列表
 
     Returns:
         同步结果字典
     """
+    effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
-    logger.info("流式同步 (无主键) 表: %s (%s → %s)",
-                table_name, src_adapter.db_type, tgt_adapter.db_type)
+    logger.info("流式同步 (无主键) 表: %s → %s (%s → %s)",
+                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type)
     start_time = time.time()
 
     src_conn = src_adapter.create_connection(use_dict_cursor=True)
@@ -235,24 +275,34 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
     synced_rows = 0
 
     try:
-        columns = src_adapter.get_table_columns(src_conn, table_name)
+        src_columns = src_adapter.get_table_columns(src_conn, table_name)
         total_rows = src_adapter.get_table_row_count(src_conn, table_name)
         logger.info("表 %s 共 ~%d 行 (流式模式)", table_name, total_rows)
 
+        if field_mapping:
+            src_col_set = set(src_columns)
+            mapped_src_cols = [m["source"] for m in field_mapping if m.get("source") in src_col_set]
+            read_columns = mapped_src_cols if mapped_src_cols else src_columns
+            col_map = {m["source"]: m["target"] for m in field_mapping if m.get("source") and m.get("target")}
+            tgt_columns = [col_map.get(c, c) for c in read_columns]
+        else:
+            read_columns = src_columns
+            tgt_columns = src_columns
+
         for batch_rows in src_adapter.fetch_all_streaming(
-            src_conn, table_name, columns, chunk_size,
+            src_conn, table_name, read_columns, chunk_size,
         ):
             insert_batch = []
             for row in batch_rows:
-                insert_batch.append(tuple(row[c] for c in columns))
+                insert_batch.append(tuple(row[c] for c in read_columns))
 
                 if len(insert_batch) >= batch_insert_size:
-                    tgt_adapter.batch_insert(tgt_conn, table_name, columns, insert_batch)
+                    tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
                     synced_rows += len(insert_batch)
                     insert_batch = []
 
             if insert_batch:
-                tgt_adapter.batch_insert(tgt_conn, table_name, columns, insert_batch)
+                tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
                 synced_rows += len(insert_batch)
                 insert_batch = []
 
@@ -260,13 +310,13 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
             if now - start_time >= 5.0:
                 pct = (synced_rows / total_rows * 100) if total_rows > 0 else 0
                 logger.info(
-                    "表 %s (流式) 进度: %d / ~%d 行 (%.1f%%)",
-                    table_name, synced_rows, total_rows, pct,
+                    "表 %s → %s (流式) 进度: %d / ~%d 行 (%.1f%%)",
+                    table_name, effective_target, synced_rows, total_rows, pct,
                 )
 
     except Exception as e:
-        logger.error("流式同步表 %s 出错: %s", table_name, e)
-        return {"table": table_name, "rows": synced_rows, "time": time.time() - start_time, "error": str(e)}
+        logger.error("流式同步表 %s → %s 出错: %s", table_name, effective_target, e)
+        return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": time.time() - start_time, "error": str(e)}
     finally:
         src_adapter.close_connection(src_conn)
         tgt_adapter.close_connection(tgt_conn)
@@ -274,10 +324,10 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
     elapsed = time.time() - start_time
     speed = synced_rows / elapsed if elapsed > 0 else 0
     logger.info(
-        "完成流式同步表 %s: %d 行, 耗时 %.1fs (%.0f 行/s)",
-        table_name, synced_rows, elapsed, speed,
+        "完成流式同步表 %s → %s: %d 行, 耗时 %.1fs (%.0f 行/s)",
+        table_name, effective_target, synced_rows, elapsed, speed,
     )
-    return {"table": table_name, "rows": synced_rows, "time": elapsed, "error": None}
+    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None}
 
 
 def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=None):
@@ -380,7 +430,7 @@ def _resolve_tables(src_cfg, requested_tables):
 
 def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
                             resume_mode, restart, task_id, stop_flag):
-    """单源同步：从一个源数据库同步表到目标。"""
+    """单源同步：从一个源数据库同步表到目标，支持表名映射和字段映射。"""
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
     logger.info("=" * 60)
@@ -393,6 +443,7 @@ def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
     chunk_size = sync_cfg.get("chunk_size", 50000)
     batch_insert_size = sync_cfg.get("batch_insert_size", 5000)
     tables = sync_cfg.get("tables", [])
+    field_mappings_cfg = sync_cfg.get("fieldMappings", {})
 
     if restart:
         db2_store.reset_progress()
@@ -403,9 +454,14 @@ def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
         tables = _resolve_tables(src_cfg, [])
 
     logger.info("待同步表: %s", tables)
+    if field_mappings_cfg:
+        logger.info("字段映射配置: %d 张表有自定义映射", len(field_mappings_cfg))
 
     for tbl in tables:
-        ensure_target_table(src_cfg, tgt_cfg, tbl, resume_mode=resume_mode)
+        fm_entry = field_mappings_cfg.get(tbl)
+        target_tbl = fm_entry.get("targetTable") if fm_entry else None
+        ensure_target_table(src_cfg, tgt_cfg, tbl, resume_mode=resume_mode,
+                            target_table_name=target_tbl)
 
     total_start = time.time()
     results = []
@@ -419,9 +475,13 @@ def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
     with ThreadPoolExecutor(max_workers=parallel) as executor:
         futures = {}
         for tbl in tables:
+            fm_entry = field_mappings_cfg.get(tbl)
+            target_tbl = fm_entry.get("targetTable") if fm_entry else None
+            field_map = fm_entry.get("mappings") if fm_entry else None
             future = executor.submit(
                 sync_table, src_cfg, tgt_cfg, tbl, chunk_size,
                 batch_insert_size, resume_mode, task_id, stop_flag,
+                target_table_name=target_tbl, field_mapping=field_map,
             )
             futures[future] = tbl
 
