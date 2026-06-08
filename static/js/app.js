@@ -2603,6 +2603,12 @@ function renderTableMappingBody(card, color) {
                 const srcT = tm.sourceTable || '';
                 const tgtT = tm.targetTable || '';
                 const fCnt = (tm.fieldMappings || []).length;
+                const rules = tm.transformRules || {};
+                const hasRules = rules.condition || rules.rowScript || (rules.aggregation && rules.aggregation.metrics && rules.aggregation.metrics.length);
+                const ruleTags = [];
+                if (rules.condition) ruleTags.push('<span class="badge badge-info" style="padding: 1px 6px; font-size: 10px; border-radius: 3px; background: #3b82f6; color: #fff; margin-left: 2px;">过滤</span>');
+                if (rules.rowScript) ruleTags.push('<span class="badge badge-warning" style="padding: 1px 6px; font-size: 10px; border-radius: 3px; background: #f59e0b; color: #fff; margin-left: 2px;">脚本</span>');
+                if (rules.aggregation && rules.aggregation.metrics && rules.aggregation.metrics.length) ruleTags.push('<span class="badge badge-success" style="padding: 1px 6px; font-size: 10px; border-radius: 3px; background: #10b981; color: #fff; margin-left: 2px;">聚合</span>');
                 return `
                     <div class="table-mapping-row">
                         <div class="mapping-row-fields">
@@ -2618,6 +2624,9 @@ function renderTableMappingBody(card, color) {
                             </select>
                             <button class="btn-secondary btn-xs" onclick="openFieldMappingModal(${idx})" title="编辑字段映射">
                                 ${fCnt > 0 ? `${fCnt}字段` : '字段映射'}
+                            </button>
+                            <button class="btn-${hasRules ? 'primary' : 'secondary'} btn-xs" onclick="openTransformModal(${idx})" title="配置数据转换规则">
+                                ${ruleTags.join('')} 数据转换
                             </button>
                             <button class="btn-danger btn-xs" onclick="removeTempMapping(${idx})" title="删除">✕</button>
                         </div>
@@ -3057,4 +3066,516 @@ function renderRecentActivity(tasks) {
             ${getStatusBadge(task.status)}
         </div>
     `).join('');
+}
+
+// ============================================================================
+// 数据转换规则配置 (条件过滤/脚本转换/聚合配置)
+// ============================================================================
+
+let currentTransformIdx = null;
+let currentTransformTab = 'condition';
+let transformSourceColumns = [];
+let transformExamples = null;
+let currentTransformDraft = null;  // 三 Tab 共享草稿，避免切换 Tab 丢失配置
+
+function _saveCurrentTabToDraft() {
+    if (!currentTransformDraft) return;
+    const tab = currentTransformTab;
+    if (tab === 'condition') {
+        const el = document.getElementById('trCondition');
+        if (el) {
+            const v = el.value.trim();
+            if (v) currentTransformDraft.condition = v;
+            else delete currentTransformDraft.condition;
+        }
+    } else if (tab === 'script') {
+        const el = document.getElementById('trRowScript');
+        if (el) {
+            const v = el.value.trim();
+            if (v) currentTransformDraft.rowScript = v;
+            else delete currentTransformDraft.rowScript;
+        }
+    } else if (tab === 'aggregation') {
+        const list = document.getElementById('trMetricsList');
+        if (list) {
+            const agg = _collectAggFromUI();
+            if (agg.metrics.length > 0) currentTransformDraft.aggregation = agg;
+            else delete currentTransformDraft.aggregation;
+        }
+    }
+}
+
+async function openTransformModal(mappingIdx) {
+    if (mappingIdx < 0 || mappingIdx >= tempTableMappings.length) return;
+
+    currentTransformIdx = mappingIdx;
+    const tm = tempTableMappings[mappingIdx];
+    // 初始化草稿
+    currentTransformDraft = tm.transformRules ? JSON.parse(JSON.stringify(tm.transformRules)) : {};
+
+    document.getElementById('transformConfigTitle').textContent =
+        `数据转换配置: ${tm.sourceTable || '?'} → ${tm.targetTable || '?'}`;
+
+    // ---- 加载源表列，供聚合配置下拉选择 ----
+    if (tm.sourceTable) {
+        try {
+            const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+            const fromNode = conn ? canvasNodes.find(n => n.id === conn.from) : null;
+            if (fromNode) {
+                const colData = await apiRequest(
+                    `/api/resources/${fromNode.resourceId}/tables/${tm.sourceTable}/columns`
+                );
+                transformSourceColumns = (colData && colData.success) ? colData.columns : [];
+            }
+        } catch (e) {
+            console.warn('加载源表列失败:', e);
+            transformSourceColumns = [];
+        }
+    }
+
+    // ---- 加载示例模板 ----
+    if (!transformExamples) {
+        try {
+            const exData = await apiRequest('/api/transform/examples');
+            if (exData && exData.success) transformExamples = exData.examples;
+        } catch (e) {
+            console.warn('加载转换示例失败:', e);
+        }
+    }
+
+    // ---- 渲染默认 Tab ----
+    switchTransformTab(currentTransformTab, true);
+    document.getElementById('transformValidateResult').style.display = 'none';
+    document.getElementById('transformConfigModal').classList.add('active');
+}
+
+function closeTransformModal() {
+    document.getElementById('transformConfigModal').classList.remove('active');
+    currentTransformIdx = null;
+    currentTransformDraft = null;
+    document.getElementById('transformValidateResult').style.display = 'none';
+}
+
+function switchTransformTab(tab, force) {
+    if (!force && currentTransformTab === tab) return;
+    // 先把当前 Tab 的输入保存到草稿
+    _saveCurrentTabToDraft();
+    currentTransformTab = tab;
+
+    // 切换 Tab 高亮
+    document.querySelectorAll('#transformTabs .tab').forEach(el => {
+        el.classList.toggle('active', el.dataset.tab === tab);
+    });
+
+    if (tab === 'condition') renderConditionTab();
+    else if (tab === 'script') renderScriptTab();
+    else if (tab === 'aggregation') renderAggregationTab();
+}
+
+function _getCurrentRules() {
+    return currentTransformDraft ? JSON.parse(JSON.stringify(currentTransformDraft)) : {};
+}
+
+function _getRuleField(field, defaultValue) {
+    const rules = _getCurrentRules();
+    if (field === 'aggregation') {
+        return rules.aggregation || { groupBy: [], metrics: [] };
+    }
+    return rules[field] !== undefined ? rules[field] : (defaultValue !== undefined ? defaultValue : '');
+}
+
+// -------------------- 条件过滤 Tab --------------------
+
+function renderConditionTab() {
+    const value = _getRuleField('condition', '');
+    const exList = (transformExamples && transformExamples.condition) || [];
+
+    document.getElementById('transformTabBody').innerHTML = `
+        <div style="padding: 4px 0;">
+            <div style="margin-bottom: 12px;">
+                <label style="font-weight: 600; margin-bottom: 6px; display: block;">条件表达式 (SQL WHERE 风格)</label>
+                <textarea id="trCondition" rows="5"
+                    style="width: 100%; padding: 8px 10px; font-family: Menlo, Consolas, monospace;
+                           font-size: 13px; border: 1px solid var(--border-color);
+                           border-radius: 6px; background: var(--bg-input); color: var(--text-primary);
+                           resize: vertical;"
+                    placeholder="例如: age >= 18 AND status = 'active' AND region IN ('CN', 'US')">${escapeHtml(value)}</textarea>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <label style="font-weight: 600; margin-bottom: 6px; display: block;">支持的语法</label>
+                <div style="font-size: 12px; color: var(--text-muted); line-height: 1.8;
+                            background: var(--bg-secondary); padding: 8px 12px; border-radius: 6px;">
+                    <div><strong>比较:</strong> <code>=</code> <code>!=</code> <code>&lt;&gt;</code> <code>&gt;</code> <code>&lt;</code> <code>&gt;=</code> <code>&lt;=</code></div>
+                    <div><strong>逻辑:</strong> <code>AND</code> <code>OR</code> <code>NOT</code> <code>(括号)</code></div>
+                    <div><strong>集合:</strong> <code>IN (...)</code> <code>NOT IN (...)</code></div>
+                    <div><strong>模糊:</strong> <code>LIKE '张%'</code> <code>NOT LIKE '%test%'</code> (<code>%</code> 任意字符, <code>_</code> 单字符)</div>
+                    <div><strong>空值:</strong> <code>IS NULL</code> <code>IS NOT NULL</code></div>
+                </div>
+            </div>
+            ${exList.length > 0 ? `
+                <div>
+                    <label style="font-weight: 600; margin-bottom: 6px; display: block;">快速示例</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        ${exList.map((ex, i) => `
+                            <button class="btn-secondary btn-xs" onclick="applyConditionExample(${i})">${escapeHtml(ex.name)}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+            ${transformSourceColumns.length > 0 ? `
+                <div style="margin-top: 12px;">
+                    <label style="font-weight: 600; margin-bottom: 6px; display: block;">可用列 (点击插入)</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 90px; overflow-y: auto;
+                                padding: 6px; background: var(--bg-secondary); border-radius: 6px;">
+                        ${transformSourceColumns.map(c => `
+                            <span onclick="insertToCondition('${c.name}')"
+                                class="column-chip" style="padding: 2px 8px; font-size: 11px;
+                                    background: var(--bg-input); border: 1px solid var(--border-color);
+                                    border-radius: 4px; cursor: pointer;" title="${escapeHtml(c.data_type)}">
+                                ${escapeHtml(c.name)}
+                            </span>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
+function insertToCondition(text) {
+    const ta = document.getElementById('trCondition');
+    if (!ta) return;
+    const start = ta.selectionStart; const end = ta.selectionEnd;
+    ta.value = ta.value.substring(0, start) + text + ta.value.substring(end);
+    const pos = start + text.length;
+    ta.setSelectionRange(pos, pos); ta.focus();
+}
+
+function applyConditionExample(i) {
+    if (!transformExamples || !transformExamples.condition[i]) return;
+    const ta = document.getElementById('trCondition');
+    if (ta) { ta.value = transformExamples.condition[i].code; ta.focus(); }
+}
+
+// -------------------- 脚本转换 Tab --------------------
+
+function renderScriptTab() {
+    const value = _getRuleField('rowScript', '');
+    const exList = (transformExamples && transformExamples.rowScript) || [];
+
+    document.getElementById('transformTabBody').innerHTML = `
+        <div style="padding: 4px 0;">
+            <div style="margin-bottom: 12px;">
+                <label style="font-weight: 600; margin-bottom: 6px; display: block;">
+                    Python 脚本 (定义 filter_row 或 transform_row 函数)
+                </label>
+                <textarea id="trRowScript" rows="14"
+                    style="width: 100%; padding: 8px 10px; font-family: Menlo, Consolas, monospace;
+                           font-size: 13px; border: 1px solid var(--border-color);
+                           border-radius: 6px; background: var(--bg-input); color: var(--text-primary);
+                           resize: vertical;"
+                    placeholder="def filter_row(row):&#10;    # 返回 False/None 过滤该行&#10;    return row.get('amount', 0) > 0&#10;&#10;def transform_row(row):&#10;    # 任意修改行, 返回修改后的行&#10;    row['full_name'] = row['first_name'] + ' ' + row['last_name']&#10;    return row">${escapeHtml(value)}</textarea>
+            </div>
+            <div style="margin-bottom: 12px;">
+                <div style="font-size: 12px; color: var(--text-muted); line-height: 1.7;
+                            background: var(--bg-secondary); padding: 8px 12px; border-radius: 6px;">
+                    <div>• 定义 <code style="background: #0002; padding: 1px 5px; border-radius: 3px;">filter_row(row)</code>: 返回 bool 决定是否保留该行</div>
+                    <div>• 定义 <code style="background: #0002; padding: 1px 5px; border-radius: 3px;">transform_row(row)</code>: 逐行转换字段（可增/删/改列）</div>
+                    <div>• 可同时定义两个函数: 先 filter, 再 transform</div>
+                    <div>• 安全沙箱: 禁止文件/网络/eval 等危险操作</div>
+                    <div>• 可用内置函数: len/str/int/float/bool/max/min/sum/round/sorted/abs/list/dict/tuple/set/isinstance 等</div>
+                </div>
+            </div>
+            ${exList.length > 0 ? `
+                <div>
+                    <label style="font-weight: 600; margin-bottom: 6px; display: block;">快速示例</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        ${exList.map((ex, i) => `
+                            <button class="btn-secondary btn-xs" onclick="applyScriptExample(${i})">${escapeHtml(ex.name)}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+        </div>
+    `;
+}
+
+function applyScriptExample(i) {
+    if (!transformExamples || !transformExamples.rowScript[i]) return;
+    const ta = document.getElementById('trRowScript');
+    if (ta) { ta.value = transformExamples.rowScript[i].code; ta.focus(); }
+}
+
+// -------------------- 聚合配置 Tab --------------------
+
+function renderAggregationTab() {
+    const agg = _getRuleField('aggregation', { groupBy: [], metrics: [] });
+    const colOptions = transformSourceColumns.map(c => c.name);
+    const funcs = [
+        { v: 'SUM', label: 'SUM 求和' },
+        { v: 'COUNT', label: 'COUNT 计数' },
+        { v: 'AVG', label: 'AVG 平均' },
+        { v: 'MAX', label: 'MAX 最大值' },
+        { v: 'MIN', label: 'MIN 最小值' },
+    ];
+    const exList = (transformExamples && transformExamples.aggregation) || [];
+
+    document.getElementById('transformTabBody').innerHTML = `
+        <div style="padding: 4px 0;">
+            <div class="alert-warning" style="font-size: 12px; padding: 8px 12px; border-radius: 6px;
+                        background: #fff7ed; border-left: 3px solid #f59e0b; color: #92400e; margin-bottom: 12px;">
+                ⚠️ 启用聚合后: 目标表将由以下列自动创建 (GROUP BY列 + 指标列);<br>
+                &nbsp;&nbsp;同步将切换为"全表收集两阶段"模式（等所有行读完再聚合写入），超大表请谨慎使用。
+            </div>
+
+            <div style="margin-bottom: 14px;">
+                <label style="font-weight: 600; margin-bottom: 6px; display: block;">GROUP BY 分组列</label>
+                <div style="display: flex; flex-wrap: wrap; gap: 4px; max-height: 110px; overflow-y: auto;
+                            padding: 8px; background: var(--bg-secondary); border-radius: 6px;" id="trGroupByList">
+                    ${colOptions.length > 0 ? colOptions.map(col => `
+                        <label style="display: flex; align-items: center; gap: 4px; font-size: 12px;
+                                      padding: 2px 8px; background: var(--bg-input);
+                                      border: 1px solid var(--border-color); border-radius: 4px; cursor: pointer;">
+                            <input type="checkbox" data-group-col="${escapeHtml(col)}"
+                                ${(agg.groupBy || []).includes(col) ? 'checked' : ''} onchange="renderAggMetricsHint()">
+                            <span>${escapeHtml(col)}</span>
+                        </label>
+                    `).join('') : '<span style="color: var(--text-muted); font-size: 12px;">请先选择源表以加载列</span>'}
+                </div>
+            </div>
+
+            <div style="margin-bottom: 14px;">
+                <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                    <label style="font-weight: 600; margin: 0;">聚合指标</label>
+                    <button class="btn-secondary btn-xs" onclick="addAggMetricRow()">+ 添加指标</button>
+                </div>
+                <div id="trMetricsList" style="display: flex; flex-direction: column; gap: 6px;">
+                    ${((agg.metrics && agg.metrics.length) ? agg.metrics : [{}]).map((m, i) => renderMetricRow(i, m, colOptions, funcs)).join('')}
+                </div>
+            </div>
+
+            ${exList.length > 0 ? `
+                <div>
+                    <label style="font-weight: 600; margin-bottom: 6px; display: block;">快速示例</label>
+                    <div style="display: flex; flex-wrap: wrap; gap: 6px;">
+                        ${exList.map((ex, i) => `
+                            <button class="btn-secondary btn-xs" onclick="applyAggExample(${i})">${escapeHtml(ex.name)}</button>
+                        `).join('')}
+                    </div>
+                </div>
+            ` : ''}
+
+            <div id="trAggPreview" style="margin-top: 14px;"></div>
+        </div>
+    `;
+    renderAggMetricsHint();
+}
+
+function renderMetricRow(i, metric, colOptions, funcs) {
+    const src = metric.source || '';
+    const tgt = metric.target || '';
+    const fn = metric.func || 'SUM';
+    return `
+        <div class="agg-metric-row" style="display: grid; grid-template-columns: 1fr 140px 1fr 30px; gap: 4px; align-items: center;
+                    padding: 6px; background: var(--bg-secondary); border-radius: 6px;">
+            <select onchange="renderAggMetricsHint()" data-metric="${i}" data-field="source">
+                <option value="">源列</option>
+                ${colOptions.map(c => `<option value="${escapeHtml(c)}" ${c === src ? 'selected' : ''}>${escapeHtml(c)}</option>`).join('')}
+            </select>
+            <select onchange="renderAggMetricsHint()" data-metric="${i}" data-field="func">
+                ${funcs.map(f => `<option value="${f.v}" ${f.v === fn ? 'selected' : ''}>${f.label}</option>`).join('')}
+            </select>
+            <input type="text" placeholder="目标列名 (如: total_amount)"
+                value="${escapeHtml(tgt)}" data-metric="${i}" data-field="target"
+                onchange="renderAggMetricsHint()" oninput="renderAggMetricsHint()">
+            <button class="btn-danger btn-xs" onclick="removeAggMetricRow(${i})" title="删除">✕</button>
+        </div>
+    `;
+}
+
+function addAggMetricRow() {
+    const funcs = [
+        { v: 'SUM', label: 'SUM 求和' },
+        { v: 'COUNT', label: 'COUNT 计数' },
+        { v: 'AVG', label: 'AVG 平均' },
+        { v: 'MAX', label: 'MAX 最大值' },
+        { v: 'MIN', label: 'MIN 最小值' },
+    ];
+    const colOptions = transformSourceColumns.map(c => c.name);
+    const list = document.getElementById('trMetricsList');
+    const count = list.querySelectorAll('.agg-metric-row').length;
+    list.insertAdjacentHTML('beforeend', renderMetricRow(count, {}, colOptions, funcs));
+    renderAggMetricsHint();
+}
+
+function removeAggMetricRow(i) {
+    const list = document.getElementById('trMetricsList');
+    const rows = list.querySelectorAll('.agg-metric-row');
+    if (rows.length <= 1) {
+        // 只剩一行就清空内容
+        rows[0].querySelectorAll('input, select').forEach(el => {
+            if (el.tagName === 'SELECT') el.value = '';
+            else el.value = '';
+        });
+    } else {
+        rows[i].remove();
+    }
+    renderAggMetricsHint();
+}
+
+function applyAggExample(i) {
+    if (!transformExamples || !transformExamples.aggregation[i]) return;
+    const ex = transformExamples.aggregation[i];
+    const colOptions = transformSourceColumns.map(c => c.name);
+    const funcs = [
+        { v: 'SUM', label: 'SUM 求和' },
+        { v: 'COUNT', label: 'COUNT 计数' },
+        { v: 'AVG', label: 'AVG 平均' },
+        { v: 'MAX', label: 'MAX 最大值' },
+        { v: 'MIN', label: 'MIN 最小值' },
+    ];
+
+    // 应用 GROUP BY
+    document.querySelectorAll('#trGroupByList input[type="checkbox"]').forEach(cb => {
+        cb.checked = (ex.groupBy || []).includes(cb.dataset.groupCol);
+    });
+
+    // 应用 metrics
+    const list = document.getElementById('trMetricsList');
+    list.innerHTML = ex.metrics.map((m, idx) => renderMetricRow(idx, m, colOptions, funcs)).join('');
+    renderAggMetricsHint();
+    showToast('已应用示例模板，请根据实际列名调整', 'info');
+}
+
+function _collectAggFromUI() {
+    const groupBy = [];
+    document.querySelectorAll('#trGroupByList input[type="checkbox"]').forEach(cb => {
+        if (cb.checked) groupBy.push(cb.dataset.groupCol);
+    });
+
+    const metrics = [];
+    document.querySelectorAll('#trMetricsList .agg-metric-row').forEach(row => {
+        const src = row.querySelector('[data-field="source"]').value;
+        const fn = row.querySelector('[data-field="func"]').value;
+        const tgt = row.querySelector('[data-field="target"]').value.trim();
+        if (src && tgt && fn) {
+            metrics.push({ source: src, target: tgt, func: fn });
+        }
+    });
+
+    return { groupBy, metrics };
+}
+
+function renderAggMetricsHint() {
+    const { groupBy, metrics } = _collectAggFromUI();
+    const preview = document.getElementById('trAggPreview');
+    if (!preview) return;
+
+    if (metrics.length === 0) {
+        preview.innerHTML = '';
+        return;
+    }
+
+    const cols = [
+        ...groupBy,
+        ...metrics.map(m => `<span style="color: var(--accent-primary);">${escapeHtml(m.target)}</span>=${escapeHtml(m.func)}(${escapeHtml(m.source)})`)
+    ];
+    preview.innerHTML = `
+        <div style="font-size: 12px; padding: 8px 12px; background: var(--bg-secondary); border-radius: 6px;">
+            <div style="font-weight: 600; margin-bottom: 4px;">目标表结构预览:</div>
+            <div>${cols.join(', <wbr>')}</div>
+        </div>
+    `;
+}
+
+// -------------------- 校验 & 保存 --------------------
+
+function _collectRulesFromUI() {
+    // 先把当前 Tab 写入草稿
+    _saveCurrentTabToDraft();
+    // 返回草稿深拷贝
+    const src = currentTransformDraft || {};
+    const out = {};
+    if (src.condition) out.condition = src.condition;
+    if (src.rowScript) out.rowScript = src.rowScript;
+    if (src.aggregation && src.aggregation.metrics && src.aggregation.metrics.length) {
+        out.aggregation = JSON.parse(JSON.stringify(src.aggregation));
+    }
+    return out;
+}
+
+async function validateTransformRules() {
+    const rules = _collectRulesFromUI();
+    const resultEl = document.getElementById('transformValidateResult');
+
+    if (!rules.condition && !rules.rowScript && !(rules.aggregation && rules.aggregation.metrics.length)) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `<div class="alert-info" style="font-size: 13px;">未填写任何转换规则（将按原样同步）</div>`;
+        return;
+    }
+
+    try {
+        showToast('正在校验...', 'info');
+        const data = await apiRequest('/api/transform/validate', 'POST', rules);
+
+        resultEl.style.display = 'block';
+        if (data && data.success) {
+            let html = `<div class="alert-success" style="font-size: 13px; padding: 10px 14px;
+                        background: #f0fdf4; border-left: 3px solid #22c55e; color: #166534; border-radius: 6px;">
+                            ✅ 校验通过！执行模式: <strong>${data.mode}</strong>
+                        </div>`;
+            if (data.warnings && data.warnings.length) {
+                html += `<div style="margin-top: 8px; font-size: 12px; color: #b45309;">
+                    ⚠️ 警告: <ul style="margin: 4px 0 0 20px;">
+                    ${data.warnings.map(w => `<li>${escapeHtml(w)}</li>`).join('')}</ul></div>`;
+            }
+            resultEl.innerHTML = html;
+        } else if (data) {
+            resultEl.innerHTML = `<div class="alert-error" style="font-size: 13px; padding: 10px 14px;
+                        background: #fef2f2; border-left: 3px solid #ef4444; color: #991b1b; border-radius: 6px;">
+                    ❌ 校验失败:
+                    <ul style="margin: 4px 0 0 20px;">
+                        ${(data.errors || ['未知错误']).map(e => `<li>${escapeHtml(e)}</li>`).join('')}
+                    </ul>
+                </div>`;
+        } else {
+            resultEl.innerHTML = `<div class="alert-error" style="font-size: 13px;">校验请求失败</div>`;
+        }
+    } catch (e) {
+        resultEl.style.display = 'block';
+        resultEl.innerHTML = `<div class="alert-error" style="font-size: 13px;">校验异常: ${escapeHtml(String(e))}</div>`;
+    }
+}
+
+function saveTransformRules() {
+    if (currentTransformIdx === null) return;
+
+    const rules = _collectRulesFromUI();
+    const tm = tempTableMappings[currentTransformIdx];
+    if (Object.keys(rules).length === 0) {
+        if (tm.transformRules) delete tm.transformRules;
+    } else {
+        tm.transformRules = rules;
+    }
+
+    closeTransformModal();
+
+    // 刷新表映射编辑器列表 UI (徽章状态)
+    const conn = canvasConnections.find(c => c.id === currentMappingConnId);
+    if (conn) {
+        renderTableMappingBody(conn.cardinality || '1:1',
+            CARDINALITY_COLORS[conn.cardinality || '1:1'] || '#6366f1');
+    }
+
+    const msg = Object.keys(rules).length
+        ? `已保存转换规则 (${Object.keys(rules).join('+')})`
+        : '已清空转换规则';
+    showToast(msg, 'success');
+}
+
+function escapeHtml(s) {
+    if (s === null || s === undefined) return '';
+    return String(s)
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
 }

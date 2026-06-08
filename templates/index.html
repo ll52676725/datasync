@@ -890,6 +890,36 @@
             </div>
         </div>
     </div>
+
+    <div id="transformConfigModal" class="modal">
+        <div class="modal-content" style="max-width: 900px; max-height: 90vh;">
+            <div class="modal-header">
+                <h3 id="transformConfigTitle">数据转换配置</h3>
+                <button class="modal-close" onclick="closeTransformModal()">&times;</button>
+            </div>
+            <div class="modal-body">
+                <div class="tabs" id="transformTabs" style="margin-bottom: 16px;">
+                    <div class="tab active" data-tab="condition" onclick="switchTransformTab('condition')">
+                        <span class="tab-icon">🔍</span> 条件过滤
+                    </div>
+                    <div class="tab" data-tab="script" onclick="switchTransformTab('script')">
+                        <span class="tab-icon">📜</span> 脚本转换
+                    </div>
+                    <div class="tab" data-tab="aggregation" onclick="switchTransformTab('aggregation')">
+                        <span class="tab-icon">📊</span> 聚合配置
+                    </div>
+                </div>
+                <div id="transformTabBody">
+                </div>
+                <div id="transformValidateResult" style="margin-top: 16px; display: none;"></div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn-secondary" onclick="validateTransformRules()">校验规则</button>
+                <button type="button" class="btn-secondary" onclick="closeTransformModal()">取消</button>
+                <button type="button" class="btn-primary" onclick="saveTransformRules()">保存转换规则</button>
+            </div>
+        </div>
+    </div>
     
     <div id="toast" class="toast"></div>
     

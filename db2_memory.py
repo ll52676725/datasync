@@ -656,14 +656,19 @@ class DB2MemoryStore:
                         if st:
                             all_source_tables.append(st)
                             fm = tm.get("fieldMappings", [])
-                            if tt and fm:
-                                all_field_mappings[st] = {
-                                    "targetTable": tt,
-                                    "mappings": [
+                            tr = tm.get("transformRules")
+                            if tt or fm or tr:
+                                entry = {}
+                                if tt:
+                                    entry["targetTable"] = tt
+                                if fm:
+                                    entry["mappings"] = [
                                         {"source": m.get("source"), "target": m.get("target")}
                                         for m in fm
                                     ]
-                                }
+                                if tr:
+                                    entry["transformRules"] = tr
+                                all_field_mappings[st] = entry
                 else:
                     node_tables = from_node.get("tables", [])
                     all_source_tables.extend(node_tables)
@@ -747,19 +752,23 @@ class DB2MemoryStore:
         if table_mappings:
             field_map = table_mappings[0].get("fieldMappings", [])
             tables = [table_mappings[0].get("sourceTable", "")]
+            transform_rules = table_mappings[0].get("transformRules")
             if not tables[0]:
                 tables = from_node.get("tables", [])
             sync = {**base_sync, "tables": tables}
-            if field_map:
-                sync["fieldMappings"] = {
-                    table_mappings[0].get("sourceTable", ""): {
-                        "targetTable": table_mappings[0].get("targetTable", ""),
-                        "mappings": [
-                            {"source": m.get("source"), "target": m.get("target")}
-                            for m in field_map
-                        ]
-                    }
-                }
+            if field_map or transform_rules:
+                src_tbl = table_mappings[0].get("sourceTable", "")
+                entry = {}
+                if table_mappings[0].get("targetTable"):
+                    entry["targetTable"] = table_mappings[0].get("targetTable", "")
+                if field_map:
+                    entry["mappings"] = [
+                        {"source": m.get("source"), "target": m.get("target")}
+                        for m in field_map
+                    ]
+                if transform_rules:
+                    entry["transformRules"] = transform_rules
+                sync["fieldMappings"] = {src_tbl: entry}
         else:
             tables = from_node.get("tables", [])
             sync = {**base_sync, "tables": tables}
@@ -783,21 +792,24 @@ class DB2MemoryStore:
             source_table = tm.get("sourceTable", "")
             target_table = tm.get("targetTable", "")
             field_mappings = tm.get("fieldMappings", [])
+            transform_rules = tm.get("transformRules")
 
             if not source_table:
                 continue
 
             sync = {**base_sync, "tables": [source_table]}
-            if target_table and field_mappings:
-                sync["fieldMappings"] = {
-                    source_table: {
-                        "targetTable": target_table,
-                        "mappings": [
-                            {"source": m.get("source"), "target": m.get("target")}
-                            for m in field_mappings
-                        ]
-                    }
-                }
+            if target_table or field_mappings or transform_rules:
+                entry = {}
+                if target_table:
+                    entry["targetTable"] = target_table
+                if field_mappings:
+                    entry["mappings"] = [
+                        {"source": m.get("source"), "target": m.get("target")}
+                        for m in field_mappings
+                    ]
+                if transform_rules:
+                    entry["transformRules"] = transform_rules
+                sync["fieldMappings"] = {source_table: entry}
             results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
 
         return results
@@ -820,14 +832,19 @@ class DB2MemoryStore:
             if st:
                 source_tables.append(st)
                 fm = tm.get("fieldMappings", [])
-                if tt and fm:
-                    merge_map[st] = {
-                        "targetTable": tt,
-                        "mappings": [
+                tr = tm.get("transformRules")
+                if tt or fm or tr:
+                    entry = {}
+                    if tt:
+                        entry["targetTable"] = tt
+                    if fm:
+                        entry["mappings"] = [
                             {"source": m.get("source"), "target": m.get("target")}
                             for m in fm
                         ]
-                    }
+                    if tr:
+                        entry["transformRules"] = tr
+                    merge_map[st] = entry
 
         sync = {**base_sync, "tables": source_tables}
         if merge_map:
@@ -852,21 +869,24 @@ class DB2MemoryStore:
             source_table = tm.get("sourceTable", "")
             target_table = tm.get("targetTable", "")
             field_mappings = tm.get("fieldMappings", [])
+            transform_rules = tm.get("transformRules")
 
             if not source_table:
                 continue
 
             sync = {**base_sync, "tables": [source_table]}
-            if target_table and field_mappings:
-                sync["fieldMappings"] = {
-                    source_table: {
-                        "targetTable": target_table,
-                        "mappings": [
-                            {"source": m.get("source"), "target": m.get("target")}
-                            for m in field_mappings
-                        ]
-                    }
-                }
+            if target_table or field_mappings or transform_rules:
+                entry = {}
+                if target_table:
+                    entry["targetTable"] = target_table
+                if field_mappings:
+                    entry["mappings"] = [
+                        {"source": m.get("source"), "target": m.get("target")}
+                        for m in field_mappings
+                    ]
+                if transform_rules:
+                    entry["transformRules"] = transform_rules
+                sync["fieldMappings"] = {source_table: entry}
             results.append({"source": src_cfg, "target": tgt_cfg, "sync": sync})
 
         return results

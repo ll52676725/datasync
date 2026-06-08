@@ -17,6 +17,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from db_adapter import get_adapter, BaseDBAdapter
 from db2_memory import db2_store
+from data_transformer import build_pipeline_for_table, TransformPipeline
 
 logger = logging.getLogger(__name__)
 
@@ -33,7 +34,7 @@ def _rename_table_in_ddl(ddl: str, new_table_name: str) -> str:
 
 
 def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False,
-                        target_table_name=None):
+                        target_table_name=None, target_columns=None):
     """
     确保目标数据库中存在与源表结构一致的表。
 
@@ -46,6 +47,8 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False,
         table_name: 源表名
         resume_mode: 是否断点续传模式
         target_table_name: 目标表名（为空时与源表同名）
+        target_columns: 指定目标表列列表（用于聚合模式等非同源结构），
+                        元素为 {"name": str, "data_type": str} 或 字符串列名
     """
     effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
@@ -60,6 +63,15 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False,
         if effective_target != table_name:
             ddl = _rename_table_in_ddl(ddl, effective_target)
 
+        # 聚合模式：自定义目标表结构
+        if target_columns:
+            ddl = _build_custom_target_ddl(
+                effective_target, target_columns,
+                src_db_type=src_adapter.db_type,
+                tgt_db_type=tgt_adapter.db_type,
+            )
+            logger.info("聚合模式：使用自定义目标表 DDL")
+
         if not tgt_adapter.table_exists(tgt_conn, effective_target):
             tgt_adapter.create_table_from_ddl(tgt_conn, ddl)
             logger.info("在目标库创建表: %s (源: %s)", effective_target, table_name)
@@ -73,9 +85,49 @@ def ensure_target_table(src_cfg, tgt_cfg, table_name, resume_mode=False,
         tgt_adapter.close_connection(tgt_conn)
 
 
+def _build_custom_target_ddl(table_name, columns, src_db_type=None, tgt_db_type=None) -> str:
+    """
+    根据列信息动态生成目标表 DDL（用于聚合 / 脚本新增列的场景）。
+
+    Args:
+        table_name: 目标表名
+        columns: 列定义列表
+            - str: 仅列名，类型推断为 VARCHAR(512)
+            - dict: {"name": "...", "data_type": "..."} 指定类型
+    Returns:
+        CREATE TABLE 语句
+    """
+    col_defs = []
+    for i, col in enumerate(columns):
+        if isinstance(col, str):
+            name = col
+            data_type = None
+        else:
+            name = col.get("name")
+            data_type = col.get("data_type")
+
+        if not data_type:
+            # 为常见聚合列名推断更合适的类型
+            lower_name = name.lower()
+            if any(k in lower_name for k in ("count", "cnt", "num", "total", "sum", "amount", "max", "min")):
+                data_type = "DECIMAL(38,10)"
+            elif any(k in lower_name for k in ("avg", "mean", "rate")):
+                data_type = "DOUBLE"
+            else:
+                data_type = "VARCHAR(512)"
+
+        quote = '"' if (tgt_db_type or "").lower() == "db2" else "`"
+        col_defs.append(f"{quote}{name}{quote} {data_type}")
+
+    quote = '"' if (tgt_db_type or "").lower() == "db2" else "`"
+    col_sql = ",\n  ".join(col_defs)
+    return f"CREATE TABLE {quote}{table_name}{quote} (\n  {col_sql}\n)"
+
+
 def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
                resume_mode=False, task_id=None, stop_flag=None,
-               target_table_name=None, field_mapping=None):
+               target_table_name=None, field_mapping=None,
+               sync_section=None):
     """
     同步单张表（主键分块模式，Web 版本）。
 
@@ -83,6 +135,7 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
     - 进度跟踪使用 db2_memory 内存存储
     - 支持通过 stop_flag 中断同步
     - 支持表名映射 (target_table_name) 和字段映射 (field_mapping)
+    - 支持数据异构转换（条件过滤 / 脚本转换 / 聚合），通过 sync_section.transformRules 配置
 
     Args:
         src_cfg: 源数据库配置
@@ -95,6 +148,7 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
         stop_flag: 停止标志字典 {"stop": True/False}
         target_table_name: 目标表名（为空时与源表同名）
         field_mapping: 字段映射列表 [{"source":"col1","target":"col2"}, ...]
+        sync_section: 配置的 sync 节（用于查找 transformRules）
 
     Returns:
         同步结果字典
@@ -102,13 +156,26 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
     effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
-    logger.info("开始同步表: %s → %s (源: %s → 目标: %s, resume=%s)",
-                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type, resume_mode)
+
+    # ---- 构建转换管道 ----
+    transform_pipeline: Optional[TransformPipeline] = None
+    if sync_section:
+        transform_pipeline = build_pipeline_for_table(
+            sync_section, table_name, source_columns=None
+        )
+    is_aggregation = transform_pipeline and not transform_pipeline.streaming_mode
+
+    logger.info("开始同步表: %s → %s (源: %s → 目标: %s, resume=%s, 转换=%s, 聚合=%s)",
+                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type,
+                resume_mode,
+                "是" if (transform_pipeline and transform_pipeline.has_any_transform) else "否",
+                "是" if is_aggregation else "否")
     start_time = time.time()
 
     src_conn = src_adapter.create_connection(use_dict_cursor=True)
     tgt_conn = tgt_adapter.create_connection()
     synced_rows = 0
+    filtered_out_rows = 0
 
     try:
         src_columns = src_adapter.get_table_columns(src_conn, table_name)
@@ -116,18 +183,46 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
             logger.warning("表 %s 无列信息，跳过", table_name)
             return {"table": table_name, "rows": 0, "time": 0, "error": "no columns"}
 
+        # ---- 确定目标列 ----
+        # 注意：转换管道在构造时 source_columns 还是 None，这里更新一下
+        if transform_pipeline is not None:
+            transform_pipeline._source_columns = list(src_columns)
+
+        # 应用字段映射（源端读取的列）
         if field_mapping:
             src_col_set = set(src_columns)
             mapped_src_cols = [m["source"] for m in field_mapping if m.get("source") in src_col_set]
             read_columns = mapped_src_cols if mapped_src_cols else src_columns
             col_map = {m["source"]: m["target"] for m in field_mapping if m.get("source") and m.get("target")}
-            tgt_columns = [col_map.get(c, c) for c in read_columns]
+            tgt_columns_mapped = [col_map.get(c, c) for c in read_columns]
         else:
             read_columns = src_columns
-            tgt_columns = src_columns
+            tgt_columns_mapped = list(src_columns)
             col_map = {}
 
+        # 如果有转换管道，目标列以管道输出为准
+        if transform_pipeline is not None and transform_pipeline.has_any_transform:
+            if is_aggregation:
+                tgt_columns = transform_pipeline.output_columns
+            else:
+                # 流式转换：目标列可能与源列相同，也可能脚本新增列
+                # 这里保守使用脚本输出后 union 源列（脚本可能添加新列）
+                tgt_columns = None  # 在流式处理时动态确定
+        else:
+            tgt_columns = list(tgt_columns_mapped)
+
         columns = read_columns
+
+        # ---- 聚合模式：不使用主键分块，直接流式收集 ----
+        if is_aggregation:
+            logger.info("表 %s 使用聚合模式：将全表收集后再写入目标", table_name)
+            src_adapter.close_connection(src_conn)
+            tgt_adapter.close_connection(tgt_conn)
+            return _sync_table_streaming(
+                src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
+                target_table_name=effective_target, field_mapping=field_mapping,
+                sync_section=sync_section,
+            )
 
         pk_col = src_adapter.get_primary_key(src_conn, table_name)
         if not pk_col:
@@ -139,6 +234,7 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
             return _sync_table_streaming(
                 src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
                 target_table_name=effective_target, field_mapping=field_mapping,
+                sync_section=sync_section,
             )
 
         total_rows = src_adapter.get_table_row_count(src_conn, table_name)
@@ -195,24 +291,56 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
 
             chunk_end = min(current_start + chunk_size - 1, max_pk)
 
+            insert_batch = []
+            dynamic_tgt_columns = None
+
             for batch_rows in src_adapter.fetch_chunk(
                 src_conn, table_name, columns, pk_col,
                 current_start, chunk_end, batch_insert_size,
             ):
-                insert_batch = []
                 for row in batch_rows:
-                    insert_batch.append(tuple(row[c] for c in columns))
+                    # ---- 数据转换管道 ----
+                    out_row = None
+                    if transform_pipeline is not None and transform_pipeline.has_any_transform:
+                        processed = transform_pipeline.process_row(dict(row))
+                        if processed is None:
+                            filtered_out_rows += 1
+                            continue
+                        out_row = processed
+                    else:
+                        out_row = dict(row)
+
+                    # 应用字段映射（目标列名）
+                    if col_map:
+                        out_row = {
+                            col_map.get(c, c): out_row.get(c) for c in (tgt_columns_mapped or list(out_row.keys()))
+                            if c in out_row
+                        }
+
+                    # 动态确定目标列（流式模式下脚本可能新增列）
+                    if tgt_columns is None:
+                        if dynamic_tgt_columns is None:
+                            dynamic_tgt_columns = list(out_row.keys())
+                        else:
+                            for k in out_row.keys():
+                                if k not in dynamic_tgt_columns:
+                                    dynamic_tgt_columns.append(k)
+
+                    effective_cols = dynamic_tgt_columns if dynamic_tgt_columns else (tgt_columns or list(out_row.keys()))
+                    insert_batch.append(tuple(out_row.get(c) for c in effective_cols))
 
                     if len(insert_batch) >= batch_insert_size:
-                        tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
+                        cols_to_use = dynamic_tgt_columns if dynamic_tgt_columns else tgt_columns
+                        tgt_adapter.batch_insert(tgt_conn, effective_target, cols_to_use, insert_batch)
                         synced_rows += len(insert_batch)
                         db2_store.update_progress(table_name, synced_rows, chunk_end)
                         insert_batch = []
 
-                if insert_batch:
-                    tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
-                    synced_rows += len(insert_batch)
-                    insert_batch = []
+            if insert_batch:
+                cols_to_use = dynamic_tgt_columns if dynamic_tgt_columns else tgt_columns
+                tgt_adapter.batch_insert(tgt_conn, effective_target, cols_to_use, insert_batch)
+                synced_rows += len(insert_batch)
+                insert_batch = []
 
             db2_store.update_progress(table_name, synced_rows, chunk_end)
 
@@ -220,8 +348,8 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
             if now - last_report >= 5.0:
                 pct = (synced_rows / total_rows * 100) if total_rows > 0 else 0
                 logger.info(
-                    "表 %s 进度: %d / ~%d 行 (%.1f%%), pk=%d / %d",
-                    table_name, synced_rows, total_rows, pct, chunk_end, max_pk,
+                    "表 %s 进度: %d / ~%d 行 (%.1f%%), pk=%d / %d, 过滤掉 %d 行",
+                    table_name, synced_rows, total_rows, pct, chunk_end, max_pk, filtered_out_rows,
                 )
                 last_report = now
 
@@ -240,16 +368,18 @@ def sync_table(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
     elapsed = time.time() - start_time
     speed = synced_rows / elapsed if elapsed > 0 else 0
     logger.info(
-        "完成表 %s → %s 同步: %d 行, 耗时 %.1fs (%.0f 行/s)",
-        table_name, effective_target, synced_rows, elapsed, speed,
+        "完成表 %s → %s 同步: %d 行, 过滤 %d 行, 耗时 %.1fs (%.0f 行/s)",
+        table_name, effective_target, synced_rows, filtered_out_rows, elapsed, speed,
     )
-    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None}
+    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None,
+            "filtered": filtered_out_rows}
 
 
 def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert_size,
-                         target_table_name=None, field_mapping=None):
+                         target_table_name=None, field_mapping=None,
+                         sync_section=None):
     """
-    流式同步（无主键回退方案，Web 版本）。
+    流式同步（无主键回退方案，Web 版本），也用于聚合模式的全表收集。
 
     Args:
         src_cfg: 源数据库配置
@@ -259,6 +389,7 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
         batch_insert_size: 批量插入的行数
         target_table_name: 目标表名（为空时与源表同名）
         field_mapping: 字段映射列表
+        sync_section: 配置的 sync 节（用于查找 transformRules 和目标表结构推断）
 
     Returns:
         同步结果字典
@@ -266,56 +397,153 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
     effective_target = target_table_name or table_name
     src_adapter = get_adapter(src_cfg)
     tgt_adapter = get_adapter(tgt_cfg)
-    logger.info("流式同步 (无主键) 表: %s → %s (%s → %s)",
-                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type)
+
+    # ---- 构建转换管道 ----
+    transform_pipeline: Optional[TransformPipeline] = None
+    if sync_section:
+        transform_pipeline = build_pipeline_for_table(
+            sync_section, table_name, source_columns=None
+        )
+    is_aggregation = transform_pipeline and not transform_pipeline.streaming_mode
+
+    logger.info("流式同步%s表: %s → %s (%s → %s, 聚合=%s)",
+                " (聚合模式) " if is_aggregation else " ",
+                table_name, effective_target, src_adapter.db_type, tgt_adapter.db_type,
+                "是" if is_aggregation else "否")
     start_time = time.time()
 
     src_conn = src_adapter.create_connection(use_dict_cursor=True)
     tgt_conn = tgt_adapter.create_connection()
     synced_rows = 0
+    filtered_out_rows = 0
 
     try:
         src_columns = src_adapter.get_table_columns(src_conn, table_name)
         total_rows = src_adapter.get_table_row_count(src_conn, table_name)
-        logger.info("表 %s 共 ~%d 行 (流式模式)", table_name, total_rows)
+        logger.info("表 %s 共 ~%d 行 (流式%s模式)",
+                    table_name, total_rows,
+                    " / 聚合" if is_aggregation else "")
 
+        if transform_pipeline is not None:
+            transform_pipeline._source_columns = list(src_columns)
+
+        # 字段映射处理
         if field_mapping:
             src_col_set = set(src_columns)
             mapped_src_cols = [m["source"] for m in field_mapping if m.get("source") in src_col_set]
             read_columns = mapped_src_cols if mapped_src_cols else src_columns
             col_map = {m["source"]: m["target"] for m in field_mapping if m.get("source") and m.get("target")}
-            tgt_columns = [col_map.get(c, c) for c in read_columns]
+            tgt_columns_mapped = [col_map.get(c, c) for c in read_columns]
         else:
             read_columns = src_columns
-            tgt_columns = src_columns
+            tgt_columns_mapped = list(src_columns)
+            col_map = {}
+
+        # 聚合模式下，目标表结构由管道输出决定
+        if is_aggregation:
+            tgt_columns = transform_pipeline.output_columns
+        else:
+            tgt_columns = None  # 动态确定（脚本可能新增列）
+
+        insert_batch = []
+        dynamic_tgt_columns = None
+        last_report = start_time
 
         for batch_rows in src_adapter.fetch_all_streaming(
             src_conn, table_name, read_columns, chunk_size,
         ):
-            insert_batch = []
             for row in batch_rows:
-                insert_batch.append(tuple(row[c] for c in read_columns))
+                out_row = None
+                # ---- 数据转换管道 ----
+                if transform_pipeline is not None and transform_pipeline.has_any_transform:
+                    processed = transform_pipeline.process_row(dict(row))
+                    if processed is None:
+                        filtered_out_rows += 1
+                        continue
+                    out_row = processed
+                else:
+                    out_row = dict(row)
+
+                # ---- 聚合模式：不立即插入 ----
+                if is_aggregation:
+                    continue
+
+                # ---- 流式模式：应用字段映射并插入 ----
+                if col_map:
+                    out_row = {
+                        col_map.get(c, c): out_row.get(c)
+                        for c in (tgt_columns_mapped or list(out_row.keys()))
+                        if c in out_row
+                    }
+
+                # 动态目标列
+                if tgt_columns is None:
+                    if dynamic_tgt_columns is None:
+                        dynamic_tgt_columns = list(out_row.keys())
+                    else:
+                        for k in out_row.keys():
+                            if k not in dynamic_tgt_columns:
+                                dynamic_tgt_columns.append(k)
+
+                effective_cols = dynamic_tgt_columns if dynamic_tgt_columns else list(out_row.keys())
+                insert_batch.append(tuple(out_row.get(c) for c in effective_cols))
 
                 if len(insert_batch) >= batch_insert_size:
-                    tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
+                    cols_to_use = dynamic_tgt_columns if dynamic_tgt_columns else tgt_columns
+                    tgt_adapter.batch_insert(tgt_conn, effective_target, cols_to_use, insert_batch)
+                    synced_rows += len(insert_batch)
+                    insert_batch = []
+
+            now = time.time()
+            if now - last_report >= 5.0:
+                if is_aggregation:
+                    logger.info(
+                        "表 %s → %s (聚合收集) 进度: 已读取 ~%d 行, 已过滤 %d 行",
+                        table_name, effective_target,
+                        synced_rows + filtered_out_rows, filtered_out_rows,
+                    )
+                else:
+                    pct = (synced_rows / total_rows * 100) if total_rows > 0 else 0
+                    logger.info(
+                        "表 %s → %s (流式) 进度: %d / ~%d 行 (%.1f%%), 过滤 %d 行",
+                        table_name, effective_target, synced_rows, total_rows, pct, filtered_out_rows,
+                    )
+                last_report = now
+
+        # ---- 插入剩余行（非聚合模式） ----
+        if insert_batch and not is_aggregation:
+            cols_to_use = dynamic_tgt_columns if dynamic_tgt_columns else tgt_columns
+            tgt_adapter.batch_insert(tgt_conn, effective_target, cols_to_use, insert_batch)
+            synced_rows += len(insert_batch)
+            insert_batch = []
+
+        # ---- 聚合模式：finalize 并批量写入 ----
+        if is_aggregation and transform_pipeline is not None:
+            logger.info("聚合模式：所有行已收集，开始执行聚合计算...")
+            aggregated_rows = transform_pipeline.finalize()
+            logger.info("聚合完成，共 %d 个分组，开始写入目标表 %s",
+                        len(aggregated_rows), effective_target)
+
+            # 聚合输出列固定
+            agg_cols = list(tgt_columns)
+            for agg_row in aggregated_rows:
+                insert_batch.append(tuple(agg_row.get(c) for c in agg_cols))
+                if len(insert_batch) >= batch_insert_size:
+                    tgt_adapter.batch_insert(tgt_conn, effective_target, agg_cols, insert_batch)
                     synced_rows += len(insert_batch)
                     insert_batch = []
 
             if insert_batch:
-                tgt_adapter.batch_insert(tgt_conn, effective_target, tgt_columns, insert_batch)
+                tgt_adapter.batch_insert(tgt_conn, effective_target, agg_cols, insert_batch)
                 synced_rows += len(insert_batch)
                 insert_batch = []
 
-            now = time.time()
-            if now - start_time >= 5.0:
-                pct = (synced_rows / total_rows * 100) if total_rows > 0 else 0
-                logger.info(
-                    "表 %s → %s (流式) 进度: %d / ~%d 行 (%.1f%%)",
-                    table_name, effective_target, synced_rows, total_rows, pct,
-                )
+            logger.info("聚合模式：写入完成，共 %d 行", synced_rows)
 
     except Exception as e:
-        logger.error("流式同步表 %s → %s 出错: %s", table_name, effective_target, e)
+        logger.error("流式%s同步表 %s → %s 出错: %s",
+                     "（聚合）" if is_aggregation else "",
+                     table_name, effective_target, e)
         return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": time.time() - start_time, "error": str(e)}
     finally:
         src_adapter.close_connection(src_conn)
@@ -324,10 +552,12 @@ def _sync_table_streaming(src_cfg, tgt_cfg, table_name, chunk_size, batch_insert
     elapsed = time.time() - start_time
     speed = synced_rows / elapsed if elapsed > 0 else 0
     logger.info(
-        "完成流式同步表 %s → %s: %d 行, 耗时 %.1fs (%.0f 行/s)",
-        table_name, effective_target, synced_rows, elapsed, speed,
+        "完成流式%s同步表 %s → %s: %d 行, 过滤 %d 行, 耗时 %.1fs (%.0f 行/s)",
+        "（聚合）" if is_aggregation else "",
+        table_name, effective_target, synced_rows, filtered_out_rows, elapsed, speed,
     )
-    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None}
+    return {"table": f"{table_name}→{effective_target}", "rows": synced_rows, "time": elapsed, "error": None,
+            "filtered": filtered_out_rows}
 
 
 def run_sync(config, resume_mode=False, restart=False, task_id=None, stop_flag=None):
@@ -457,11 +687,26 @@ def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
     if field_mappings_cfg:
         logger.info("字段映射配置: %d 张表有自定义映射", len(field_mappings_cfg))
 
+    # ---- 预构建每个表的转换管道，用于确定目标表结构 ----
+    table_pipelines = {}
+    for tbl in tables:
+        try:
+            pipeline = build_pipeline_for_table(sync_cfg, tbl)
+            if pipeline and pipeline.has_any_transform:
+                table_pipelines[tbl] = pipeline
+        except Exception as e:
+            logger.error("表 %s 的转换规则错误，该表将跳过数据转换: %s", tbl, e)
+
     for tbl in tables:
         fm_entry = field_mappings_cfg.get(tbl)
         target_tbl = fm_entry.get("targetTable") if fm_entry else None
+        target_columns = None
+        pipeline = table_pipelines.get(tbl)
+        if pipeline and not pipeline.streaming_mode:
+            target_columns = pipeline.output_columns
+            logger.info("表 %s 使用聚合模式，目标列: %s", tbl, target_columns)
         ensure_target_table(src_cfg, tgt_cfg, tbl, resume_mode=resume_mode,
-                            target_table_name=target_tbl)
+                            target_table_name=target_tbl, target_columns=target_columns)
 
     total_start = time.time()
     results = []
@@ -482,6 +727,7 @@ def _run_sync_single_source(src_cfg, tgt_cfg, sync_cfg,
                 sync_table, src_cfg, tgt_cfg, tbl, chunk_size,
                 batch_insert_size, resume_mode, task_id, stop_flag,
                 target_table_name=target_tbl, field_mapping=field_map,
+                sync_section=sync_cfg,
             )
             futures[future] = tbl
 

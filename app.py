@@ -33,6 +33,7 @@ from flask import Flask, render_template, request, jsonify, session, redirect, u
 from db_adapter import get_adapter, get_supported_types
 from db2_memory import db2_store
 from sync_engine_web import run_sync, reset_progress_db2
+from data_transformer import validate_transform_rules
 from realtime_sync_engine import (
     start_realtime_sync,
     stop_realtime_sync,
@@ -1011,6 +1012,111 @@ def get_resource_table_columns(resource_id, table_name):
     except Exception as e:
         logger.error("获取表字段列表失败: %s", e)
         return jsonify({"success": False, "message": f"获取表字段列表失败: {str(e)}"}), 500
+
+# ====================================================================== #
+#                       数据转换规则验证 API
+# ====================================================================== #
+
+@app.route("/api/transform/validate", methods=["POST"])
+@login_required
+def validate_transform():
+    """
+    校验数据转换规则（条件表达式/行级脚本/聚合配置）。
+
+    请求体:
+        {
+            "condition": "age >= 18 AND status = 'active'",
+            "rowScript": "def filter_row(row):...",
+            "aggregation": {
+                "groupBy": ["category"],
+                "metrics": [{"source": "amount", "target": "total", "func": "SUM"}]
+            }
+        }
+
+    Returns:
+        {
+            "success": true/false,
+            "errors": ["..."],
+            "warnings": ["..."],
+            "mode": "streaming" | "aggregation"
+        }
+    """
+    data = request.get_json() or {}
+    result = validate_transform_rules(data)
+
+    # 推断执行模式
+    from data_transformer import TransformPipeline
+    try:
+        has_agg = bool((data.get("aggregation") or {}).get("metrics"))
+        result["mode"] = "aggregation" if has_agg else "streaming"
+    except Exception:
+        result["mode"] = "unknown"
+
+    logger.info("转换规则校验: 结果=%s, 模式=%s, 错误数=%d",
+                "通过" if result["success"] else "失败",
+                result["mode"], len(result["errors"]))
+    return jsonify({"success": result["success"], **result})
+
+
+@app.route("/api/transform/examples", methods=["GET"])
+@login_required
+def get_transform_examples():
+    """获取数据转换示例模板，便于前端展示。"""
+    examples = {
+        "condition": [
+            {
+                "name": "按金额过滤",
+                "code": "amount > 1000 AND status = 'paid'"
+            },
+            {
+                "name": "日期范围",
+                "code": "created_at >= '2024-01-01' AND created_at < '2025-01-01'"
+            },
+            {
+                "name": "按分类包含",
+                "code": "category IN ('A', 'B', 'C') AND region IS NOT NULL"
+            },
+            {
+                "name": "模糊匹配名称",
+                "code": "name LIKE '张%' AND email LIKE '%@company.com'"
+            }
+        ],
+        "rowScript": [
+            {
+                "name": "按条件过滤行",
+                "code": "def filter_row(row):\n    return row.get('status') == 'active' and row.get('amount', 0) > 0"
+            },
+            {
+                "name": "字段转换/新增",
+                "code": "def transform_row(row):\n    row['full_name'] = row.get('first_name', '') + ' ' + row.get('last_name', '')\n    row['amount_usd'] = round(float(row.get('amount', 0)) * 0.14, 2)\n    return row"
+            },
+            {
+                "name": "过滤+转换组合",
+                "code": "def filter_row(row):\n    return row.get('is_valid', 0) == 1\n\ndef transform_row(row):\n    row['display_label'] = f\"{row.get('code')} - {row.get('name')}\"\n    return row"
+            }
+        ],
+        "aggregation": [
+            {
+                "name": "按地区统计销售额",
+                "groupBy": ["region"],
+                "metrics": [
+                    {"source": "amount", "target": "total_amount", "func": "SUM"},
+                    {"source": "id", "target": "order_count", "func": "COUNT"},
+                    {"source": "amount", "target": "avg_amount", "func": "AVG"}
+                ]
+            },
+            {
+                "name": "按分类+月份汇总",
+                "groupBy": ["category", "month"],
+                "metrics": [
+                    {"source": "qty", "target": "total_qty", "func": "SUM"},
+                    {"source": "price", "target": "max_price", "func": "MAX"},
+                    {"source": "price", "target": "min_price", "func": "MIN"}
+                ]
+            }
+        ]
+    }
+    return jsonify({"success": True, "examples": examples})
 
 # ====================================================================== #
 #                           流水线管理 API
